@@ -1,0 +1,2395 @@
+{
+  "exported_at": "2026-06-22T15:32:35.582Z",
+  "entities": {
+    "Meeting": [
+      {
+        "id": "6a03286dcf7031c9474ae64d",
+        "title": "Leadership Continuity Crisis Protocol",
+        "objective": "Ensure operational continuity, manage succession planning, address stakeholder concerns, and honor the deceased appropriately",
+        "participant_info": "Board Chair, Chief Operating Officer, General Counsel, HR Director, Communications Director, Senior Leadership Team, Family Liaison",
+        "roleContext": "Coach",
+        "talking_points": [
+          {
+            "point": "Immediate succession plan activation",
+            "desired_outcome": "Succession plan implemented with authority chains confirmed",
+            "notes": "Succession documents, emergency authority matrix, board notification procedures"
+          },
+          {
+            "point": "Stakeholder notification sequence and timing",
+            "desired_outcome": "Stakeholders notified appropriately with consistent messaging",
+            "notes": "Notification priority matrix, prepared statements, SEC filing requirements"
+          },
+          {
+            "point": "Media statement preparation and crisis communications",
+            "desired_outcome": "Media strategy coordinated with appropriate messaging",
+            "notes": "Press release templates, spokesperson designation, interview protocols"
+          },
+          {
+            "point": "Employee communication and morale support",
+            "desired_outcome": "Employee morale supported with clear communication",
+            "notes": "All-hands meetings, counseling services, memorial planning"
+          },
+          {
+            "point": "Business continuity and client assurance",
+            "desired_outcome": "Operations continuing with client confidence maintained",
+            "notes": "Client communication scripts, service continuation plans, relationship management"
+          },
+          {
+            "point": "Memorial coordination and family liaison",
+            "desired_outcome": "Family wishes respected with appropriate memorial arrangements",
+            "notes": "Cultural considerations, memorial service planning, family privacy protection"
+          }
+        ],
+        "is_emergency": true
+      },
+      {
+        "id": "68992531aa49c62c34c9abfe",
+        "title": "Emergent Sunday Aug 10, 2025 7:03 PM",
+        "objective": "Capture and advise on impromptu conversation or situation",
+        "participant_info": "Impromptu conversation - participants and context determined dynamically",
+        "roleContext": "Ambient",
+        "talking_points": [
+          {
+            "point": "Active listening and real-time guidance",
+            "desired_outcome": "Provide contextual advice based on what's being discussed",
+            "notes": "AI will listen continuously and provide suggestions as the conversation develops"
+          }
+        ],
+        "is_emergency": true
+      },
+      {
+        "id": "6887cb5fd9ed0d076b743c78",
+        "title": "Emergent Monday Jul 28, 2025 3:11 PM",
+        "objective": "Capture and advise on impromptu conversation or situation",
+        "participant_info": "Impromptu conversation - participants and context determined dynamically",
+        "roleContext": "Ambient",
+        "talking_points": [
+          {
+            "point": "Active listening and real-time guidance",
+            "desired_outcome": "Provide contextual advice based on what's being discussed",
+            "notes": "AI will listen continuously and provide suggestions as the conversation develops"
+          }
+        ],
+        "is_emergency": true
+      },
+      {
+        "id": "688786b82b5d8ec24ee09b62",
+        "title": "Emergent Monday Jul 28, 2025 10:18 AM",
+        "objective": "Capture and advise on impromptu conversation or situation",
+        "participant_info": "Impromptu conversation - participants and context determined dynamically",
+        "roleContext": "Ambient",
+        "talking_points": [
+          {
+            "point": "Active listening and real-time guidance",
+            "desired_outcome": "Provide contextual advice based on what's being discussed",
+            "notes": "AI will listen continuously and provide suggestions as the conversation develops"
+          }
+        ],
+        "is_emergency": true
+      },
+      {
+        "id": "6886afb707c2cad05c11d6d7",
+        "title": "Emergent Sunday Jul 27, 2025 7:01 PM",
+        "objective": "Capture and advise on impromptu conversation or situation",
+        "participant_info": "Impromptu conversation - participants and context determined dynamically",
+        "roleContext": "Ambient",
+        "talking_points": [
+          {
+            "point": "Active listening and real-time guidance",
+            "desired_outcome": "Provide contextual advice based on what's being discussed",
+            "notes": "AI will listen continuously and provide suggestions as the conversation develops"
+          }
+        ],
+        "is_emergency": true
+      },
+      {
+        "id": "6886ac2db9c251d13991091d",
+        "title": "Test meeting",
+        "objective": "be heard",
+        "participant_info": "spouse",
+        "roleContext": "Coach",
+        "talking_points": [
+          {
+            "point": "Chores",
+            "desired_outcome": "establis a list",
+            "notes": "Lawn v Laundry"
+          }
+        ],
+        "is_emergency": false
+      }
+    ],
+    "ConversationInsight": [],
+    "EmergencyTemplate": [
+      {
+        "id": "68876a16895cef6cc1cfea29",
+        "title": "Severe Weather Emergency Response Protocol (Installed)",
+        "objective": "Coordinate immediate safety measures, communication protocols, and resource allocation during severe weather events",
+        "category": "crisis",
+        "participant_info": "Emergency Management Director, Facility Manager, Safety Officer, Communications Lead, Department Heads, Local Emergency Services Liaison",
+        "talking_points": [
+          {
+            "point": "Current weather threat assessment and timeline",
+            "desired_outcome": "Clear understanding of threat level, timing, and impact zones",
+            "notes": "NOAA weather radio frequencies, meteorologist consultation, local emergency management coordination"
+          },
+          {
+            "point": "Evacuation vs. shelter-in-place decision criteria",
+            "desired_outcome": "Clear go/no-go decision on evacuation with documented rationale",
+            "notes": "Consider building integrity, transportation safety, shelter capacity, special needs population"
+          },
+          {
+            "point": "Critical infrastructure protection priorities",
+            "desired_outcome": "Confirmed protection measures for essential systems",
+            "notes": "Emergency generator fuel levels, data center protection, medical equipment backup power"
+          }
+        ],
+        "ai_prompts": null,
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d149",
+        "title": "Pandemic Emergency Management Framework",
+        "objective": "Establish containment protocols, maintain essential operations, and protect workforce health during pandemic conditions",
+        "category": "crisis",
+        "participant_info": "Chief Medical Officer, HR Director, Operations Manager, IT Director, Supply Chain Manager, Legal Counsel, Union Representatives",
+        "talking_points": [
+          {
+            "point": "Current infection rates and transmission assessment",
+            "desired_outcome": "Clear understanding of outbreak scope and risk levels",
+            "notes": "CDC guidance updates, local health department data, contact tracing results"
+          },
+          {
+            "point": "Workforce exposure assessment and contact tracing",
+            "desired_outcome": "Defined exposure response protocols with clear isolation procedures",
+            "notes": "Employee health screening, contact mapping, quarantine requirements"
+          },
+          {
+            "point": "Remote work capability and essential worker identification",
+            "desired_outcome": "Remote work assignments completed with essential operations maintained",
+            "notes": "Technology requirements, VPN capacity, essential function matrix"
+          },
+          {
+            "point": "PPE inventory and distribution protocols",
+            "desired_outcome": "PPE distribution plan activated with burn rate monitoring",
+            "notes": "Current inventory levels, supplier relationships, usage calculations"
+          },
+          {
+            "point": "Testing and vaccination protocol implementation",
+            "desired_outcome": "Testing/screening procedures implemented organization-wide",
+            "notes": "Testing vendor contracts, vaccination site coordination, record keeping requirements"
+          },
+          {
+            "point": "Business continuity for critical functions",
+            "desired_outcome": "Critical operations continuing with pandemic modifications",
+            "notes": "Cross-training requirements, succession planning, vendor contingencies"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Guide this pandemic emergency management session focused on establishing containment protocols while maintaining essential operations. With medical, HR, operations, IT, supply chain, legal, and union representatives present, address each protocol systematically. Ensure compliance with CDC guidelines and local health department mandates while balancing business continuity needs. Prioritize employee health while maintaining critical services.",
+          "question_analysis": "In this pandemic response meeting, evaluate the participant's input regarding: 1) Health and safety impact on workforce, 2) Operational feasibility given current constraints, 3) Legal compliance with OSHA, ADA, and health department requirements, 4) Resource availability including PPE, technology, and staffing. Consider the evolving nature of pandemic guidance and need for flexible protocols.",
+          "next_steps": "Following the pandemic response discussion, synthesize actions into clear phases: 1) 24-hour priorities for immediate health protection, 2) 72-hour goals for operational stability, 3) Week-one milestones for full protocol implementation, 4) Ongoing monitoring metrics for infection rates, operational capacity, and employee wellbeing. Establish regular review cycles to adapt to changing conditions."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d151",
+        "title": "Employee Legal Crisis Management",
+        "objective": "Protect organizational interests, support employee rights, manage operational impact, and handle internal/external communications",
+        "category": "personnel",
+        "participant_info": "General Counsel, HR Director, Department Manager, Security Director, Communications Director, Union Representative (if applicable)",
+        "talking_points": [
+          {
+            "point": "Charge assessment and legal implications",
+            "desired_outcome": "Legal strategy determined with organizational exposure assessed",
+            "notes": "Charge severity, employment contract terms, legal defense obligations"
+          },
+          {
+            "point": "Employment policy review and compliance",
+            "desired_outcome": "Policy compliance confirmed with appropriate employment actions",
+            "notes": "Suspension policies, termination procedures, due process requirements"
+          },
+          {
+            "point": "Operational coverage and workflow continuity",
+            "desired_outcome": "Operational coverage arranged with minimal disruption",
+            "notes": "Temporary assignments, project transfers, client notifications"
+          },
+          {
+            "point": "Security clearance and access management",
+            "desired_outcome": "Access privileges managed appropriately with security maintained",
+            "notes": "Clearance suspension, system access removal, facility restrictions"
+          },
+          {
+            "point": "Communication strategy and reputation management",
+            "desired_outcome": "Communication plan approved with reputation protection",
+            "notes": "Media inquiries, client communications, internal messaging"
+          },
+          {
+            "point": "Legal support and employee assistance",
+            "desired_outcome": "Employee rights protected with appropriate support provided",
+            "notes": "Legal representation, bail assistance, employee assistance programs"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Facilitate this confidential employee legal crisis meeting with focus on balancing organizational protection and employee rights. With legal, HR, management, security, communications, and union representation involved, carefully navigate employment law requirements while protecting organizational interests. Maintain confidentiality and due process.",
+          "question_analysis": "During this sensitive employee legal situation, evaluate the counsel's advice for: 1) Legal exposure and liability management, 2) Policy compliance and precedent implications, 3) Employee rights and due process requirements, 4) Organizational reputation and stakeholder impact. Balance legal obligations with practical business needs.",
+          "next_steps": "Conclude this employee legal crisis planning with: 1) Legal monitoring and case management, 2) HR actions and policy compliance, 3) Communication timing and stakeholder management, 4) Review triggers and decision points. Maintain confidentiality while ensuring organizational protection."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d152",
+        "title": "Supply Chain Disruption Crisis Management",
+        "objective": "Maintain critical operations, implement alternative sourcing, manage customer expectations, and minimize financial impact",
+        "category": "other",
+        "participant_info": "Chief Operating Officer, Supply Chain Director, Procurement Manager, Finance Director, Customer Service Director, Legal Counsel",
+        "talking_points": [
+          {
+            "point": "Critical supply assessment and inventory analysis",
+            "desired_outcome": "Critical supply shortages identified with inventory burn rates calculated",
+            "notes": "Strategic inventory levels, critical vs. non-critical supplies, usage forecasting"
+          },
+          {
+            "point": "Alternative supplier identification and qualification",
+            "desired_outcome": "Alternative sources identified and qualification process initiated",
+            "notes": "Supplier database, quality requirements, capacity assessment, lead times"
+          },
+          {
+            "point": "Customer prioritization and allocation strategy",
+            "desired_outcome": "Customer priorities established with allocation strategy approved",
+            "notes": "Customer contract terms, strategic relationships, revenue impact analysis"
+          },
+          {
+            "point": "Financial impact assessment and mitigation",
+            "desired_outcome": "Financial impact quantified with mitigation strategies implemented",
+            "notes": "Cost analysis, insurance coverage, contract force majeure clauses"
+          },
+          {
+            "point": "Production adjustment and capacity management",
+            "desired_outcome": "Production schedules adjusted with capacity optimized",
+            "notes": "Manufacturing flexibility, product substitutions, efficiency improvements"
+          },
+          {
+            "point": "Recovery timeline and normalization planning",
+            "desired_outcome": "Recovery plan developed with realistic timeline established",
+            "notes": "Market recovery indicators, supplier relationship rebuilding, lessons learned integration"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Lead this urgent supply chain disruption response with focus on maintaining customer service and minimizing financial impact. With operations, supply chain, procurement, finance, customer service, and legal counsel assembled, systematically address supply alternatives and customer management. Balance short-term crisis response with long-term relationship preservation.",
+          "question_analysis": "During this critical supply chain crisis, evaluate the expert's input for: 1) Operational impact and customer service implications, 2) Financial exposure and cost management options, 3) Risk assessment and alternative solutions, 4) Timeline considerations and recovery planning. Balance customer needs with financial sustainability.",
+          "next_steps": "Finalize this supply chain crisis response with: 1) Alternative sourcing actions and supplier engagement, 2) Customer communications and expectation management, 3) Inventory allocation and usage monitoring, 4) Recovery progress metrics and milestone tracking. Maintain crisis coordination through full supply restoration."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14a",
+        "title": "Active Threat Response and Lockdown Procedures",
+        "objective": "Protect lives through immediate lockdown implementation, coordinate with law enforcement, and manage crisis communications",
+        "category": "crisis",
+        "participant_info": "Security Director, Facility Manager, Law Enforcement Liaison, Communications Director, Medical Response Team Lead, Executive Leadership",
+        "talking_points": [
+          {
+            "point": "Threat verification and location status",
+            "desired_outcome": "Immediate threat assessment with location and nature confirmed",
+            "notes": "Duress code words, verification protocols, law enforcement notification"
+          },
+          {
+            "point": "Lockdown initiation and all-clear protocols",
+            "desired_outcome": "Immediate lockdown implementation across all areas",
+            "notes": "Door locking procedures, communication systems, safe room protocols"
+          },
+          {
+            "point": "Law enforcement coordination and facility access",
+            "desired_outcome": "Law enforcement response coordinated with facility access provided",
+            "notes": "Building access codes, floor plans, utility shut-offs, camera system access"
+          },
+          {
+            "point": "Personnel accountability and medical response",
+            "desired_outcome": "Full personnel accountability achieved with medical teams positioned",
+            "notes": "Headcount procedures, medical staging areas, trauma response resources"
+          },
+          {
+            "point": "Communications blackout and information control",
+            "desired_outcome": "Information flow controlled to prevent interference with response",
+            "notes": "Social media monitoring, family notification procedures, media staging"
+          },
+          {
+            "point": "Post-incident support and investigation cooperation",
+            "desired_outcome": "Support services activated and investigation protocols followed",
+            "notes": "Trauma counseling resources, evidence preservation, witness coordination"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "URGENT: Facilitate this active threat response meeting with absolute priority on life safety. With security, facility, law enforcement, communications, medical, and executive leadership involved, immediately address threat containment and response coordination. Time is critical - make rapid decisions based on verified information while ensuring responder safety and tactical advantage.",
+          "question_analysis": "CRITICAL: During this active threat response, assess the participant's report immediately for: 1) Life safety impact requiring immediate action, 2) Tactical implications for law enforcement response, 3) Required resources for medical or security response, 4) Decision urgency and authority level needed. Every second counts - prioritize actions that save lives.",
+          "next_steps": "POST-IMMEDIATE THREAT: Transition from active response to scene security and recovery. Establish: 1) Scene security maintenance and evidence preservation, 2) Investigation support and witness management, 3) Recovery initiation including facility assessment, 4) Communication releases and family reunification. Maintain security posture until all-clear from law enforcement."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14b",
+        "title": "Cyber Attack and Data Breach Response Protocol",
+        "objective": "Contain cyber threats, preserve evidence, maintain critical operations, and manage breach notifications",
+        "category": "technical",
+        "participant_info": "Chief Information Security Officer, IT Director, Legal Counsel, Chief Financial Officer, Communications Director, Cyber Insurance Representative",
+        "talking_points": [
+          {
+            "point": "Attack vector identification and immediate containment",
+            "desired_outcome": "Threat contained with attack method identified and systems isolated",
+            "notes": "Network monitoring tools, intrusion detection alerts, system isolation procedures"
+          },
+          {
+            "point": "Data compromise scope and impact assessment",
+            "desired_outcome": "Full scope of data compromise determined with impact analysis",
+            "notes": "Data classification matrix, access logs, encrypted data status"
+          },
+          {
+            "point": "Evidence preservation and forensic coordination",
+            "desired_outcome": "Evidence preserved and forensic investigation initiated",
+            "notes": "Chain of custody procedures, forensic investigator contacts, law enforcement notification"
+          },
+          {
+            "point": "Business continuity and backup system activation",
+            "desired_outcome": "Critical operations maintained through backup systems",
+            "notes": "Backup system locations, recovery time objectives, critical system priorities"
+          },
+          {
+            "point": "Regulatory notification and legal compliance",
+            "desired_outcome": "Legal notification timeline established with regulatory compliance confirmed",
+            "notes": "GDPR, HIPAA, state breach laws, notification deadlines, legal counsel coordination"
+          },
+          {
+            "point": "Customer and stakeholder communications",
+            "desired_outcome": "Communication strategy approved with stakeholder notifications planned",
+            "notes": "PR firm contacts, customer notification templates, media response procedures"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Lead this cyber incident response with focus on rapid containment and evidence preservation. With CISO, IT, legal, finance, communications, and insurance representatives assembled, balance immediate threat containment with evidence preservation requirements. Follow established incident response procedures while maintaining business continuity for critical operations.",
+          "question_analysis": "During this cyber incident response, analyze the technical expert's input for: 1) Containment effectiveness and additional isolation needs, 2) Business impact and operational workarounds, 3) Legal ramifications including notification requirements, 4) Recovery complexity and timeline. Consider both technical and legal constraints in response decisions.",
+          "next_steps": "Post-containment, transition to recovery and compliance: 1) System recovery sequence with security validation, 2) Testing protocols for restored systems, 3) Notification timeline execution per legal requirements, 4) Lessons learned process and security improvements. Maintain incident command structure through full recovery."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14d",
+        "title": "Critical Utility Failure Response Plan",
+        "objective": "Maintain life safety systems, preserve critical operations, and implement resource conservation during extended utility outages",
+        "category": "technical",
+        "participant_info": "Facility Director, Chief Engineer, Safety Manager, Medical Director, IT Manager, Finance Director, Vendor Relations Manager",
+        "talking_points": [
+          {
+            "point": "Outage scope assessment and restoration timeline",
+            "desired_outcome": "Full understanding of outage extent with realistic restoration timeline",
+            "notes": "Utility company coordination, affected systems inventory, restoration priority matrix"
+          },
+          {
+            "point": "Emergency power systems and fuel management",
+            "desired_outcome": "Emergency power prioritized with fuel consumption managed",
+            "notes": "Generator capacity calculations, fuel delivery schedules, load shedding procedures"
+          },
+          {
+            "point": "Critical system prioritization and load management",
+            "desired_outcome": "Life safety systems maintained with critical operations prioritized",
+            "notes": "System priority matrix, power distribution, manual override procedures"
+          },
+          {
+            "point": "Resource conservation and alternative arrangements",
+            "desired_outcome": "Resource conservation implemented with alternative sources secured",
+            "notes": "Water storage capacity, food preservation, temperature control alternatives"
+          },
+          {
+            "point": "Staff scheduling and operational adjustments",
+            "desired_outcome": "Staffing adjusted for extended outage with operational modifications",
+            "notes": "Shift rotations, remote work arrangements, essential personnel housing"
+          },
+          {
+            "point": "Vendor coordination and external support",
+            "desired_outcome": "Vendor support confirmed with external resources coordinated",
+            "notes": "Emergency service contracts, equipment rental, mutual aid agreements"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Guide this utility failure response meeting with focus on life safety and critical operations. With facility, engineering, safety, medical, IT, finance, and vendor management involved, systematically address power management and resource conservation. Prioritize life safety systems while planning for extended outage scenarios.",
+          "question_analysis": "During this utility failure response, analyze the expert's input for: 1) Resource impact on critical operations and life safety, 2) Safety implications of proposed solutions, 3) Alternative approaches and backup options, 4) Cost considerations and budget impact. Balance immediate needs with long-term sustainability during extended outage.",
+          "next_steps": "Conclude this utility failure planning with: 1) Monitoring schedule for critical systems and resources, 2) Conservation measures and usage tracking, 3) Contingency triggers for escalation, 4) Communication updates for stakeholders and staff. Establish command structure for extended operations."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d148",
+        "title": "Severe Weather Emergency Response Protocol",
+        "objective": "Coordinate immediate safety measures, communication protocols, and resource allocation during severe weather events",
+        "category": "crisis",
+        "participant_info": "Emergency Management Director, Facility Manager, Safety Officer, Communications Lead, Department Heads, Local Emergency Services Liaison",
+        "talking_points": [
+          {
+            "point": "Current weather threat assessment and timeline",
+            "desired_outcome": "Clear understanding of threat level, timing, and impact zones",
+            "notes": "NOAA weather radio frequencies, meteorologist consultation, local emergency management coordination"
+          },
+          {
+            "point": "Evacuation vs. shelter-in-place decision criteria",
+            "desired_outcome": "Clear go/no-go decision on evacuation with documented rationale",
+            "notes": "Consider building integrity, transportation safety, shelter capacity, special needs population"
+          },
+          {
+            "point": "Critical infrastructure protection priorities",
+            "desired_outcome": "Confirmed protection measures for essential systems",
+            "notes": "Emergency generator fuel levels, data center protection, medical equipment backup power"
+          },
+          {
+            "point": "Staff accountability and family notification procedures",
+            "desired_outcome": "Verified staff and dependent accountability system activated",
+            "notes": "Emergency contact trees, dependent care arrangements, transportation assistance"
+          },
+          {
+            "point": "Resource inventory status and allocation",
+            "desired_outcome": "Resource allocation plan activated with confirmed supplies",
+            "notes": "Water, food, medical supplies, generators, fuel reserves, communication equipment"
+          },
+          {
+            "point": "Post-storm damage assessment and recovery protocols",
+            "desired_outcome": "Recovery team assignments confirmed with clear priorities",
+            "notes": "Insurance documentation, damage assessment teams, contractor contacts, regulatory notifications"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "You are facilitating an emergency response meeting for severe weather. The objective is to coordinate immediate safety measures, communication protocols, and resource allocation during severe weather events. Participants include Emergency Management Director, Facility Manager, Safety Officer, Communications Lead, Department Heads, and Local Emergency Services Liaison. Begin by establishing the current threat level and timeline from NOAA data, then systematically address each talking point with urgency appropriate to the timeline. Focus on life safety first, then property protection. Ensure all decisions are documented with clear rationale and assignments.",
+          "question_analysis": "During this severe weather emergency response meeting, a participant has provided input about the current situation. Analyze this input for: 1) Critical safety implications and immediate actions required, 2) Resource requirements and availability, 3) Decision points that cannot be delayed, 4) Potential obstacles to implementation. Consider the time-sensitive nature of weather events and the need for pre-positioning resources. Reference current weather data, facility capabilities, and staff safety as primary factors.",
+          "next_steps": "Based on the severe weather emergency discussion, we need to transition from planning to execution. Identify: 1) Immediate actions required in the next 2 hours before conditions deteriorate, 2) Specific assignments with deadlines tied to weather timeline, 3) Next checkpoint time for status updates, 4) Success metrics for each phase (preparation, event, recovery). Ensure communication redundancies are in place and all participants understand their roles."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14f",
+        "title": "Leadership Continuity Crisis Protocol",
+        "objective": "Ensure operational continuity, manage succession planning, address stakeholder concerns, and honor the deceased appropriately",
+        "category": "personnel",
+        "participant_info": "Board Chair, Chief Operating Officer, General Counsel, HR Director, Communications Director, Senior Leadership Team, Family Liaison",
+        "talking_points": [
+          {
+            "point": "Immediate succession plan activation",
+            "desired_outcome": "Succession plan implemented with authority chains confirmed",
+            "notes": "Succession documents, emergency authority matrix, board notification procedures"
+          },
+          {
+            "point": "Stakeholder notification sequence and timing",
+            "desired_outcome": "Stakeholders notified appropriately with consistent messaging",
+            "notes": "Notification priority matrix, prepared statements, SEC filing requirements"
+          },
+          {
+            "point": "Media statement preparation and crisis communications",
+            "desired_outcome": "Media strategy coordinated with appropriate messaging",
+            "notes": "Press release templates, spokesperson designation, interview protocols"
+          },
+          {
+            "point": "Employee communication and morale support",
+            "desired_outcome": "Employee morale supported with clear communication",
+            "notes": "All-hands meetings, counseling services, memorial planning"
+          },
+          {
+            "point": "Business continuity and client assurance",
+            "desired_outcome": "Operations continuing with client confidence maintained",
+            "notes": "Client communication scripts, service continuation plans, relationship management"
+          },
+          {
+            "point": "Memorial coordination and family liaison",
+            "desired_outcome": "Family wishes respected with appropriate memorial arrangements",
+            "notes": "Cultural considerations, memorial service planning, family privacy protection"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Guide this sensitive leadership continuity meeting with appropriate reverence and organizational focus. With board, operations, legal, HR, communications, senior leadership, and family liaison present, respectfully address operational continuity while honoring the deceased. Balance grief with business necessity and stakeholder responsibilities.",
+          "question_analysis": "During this leadership continuity meeting, evaluate the participant's suggestion for: 1) Organizational stability and stakeholder confidence, 2) Impact on employee morale and organizational culture, 3) Family sensitivity and privacy concerns, 4) Legal and fiduciary responsibilities. Balance respect for the deceased with organizational continuity needs.",
+          "next_steps": "Finalize this leadership continuity planning with: 1) Transition timeline and authority delegation, 2) Communication cadence and stakeholder updates, 3) Memorial planning and family coordination, 4) Succession process and long-term leadership development. Honor the deceased while ensuring organizational stability."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d150",
+        "title": "Hazardous Material Emergency Response",
+        "objective": "Protect life safety through evacuation/shelter procedures, contain hazard spread, and coordinate specialized response teams",
+        "category": "technical",
+        "participant_info": "Safety Director, Environmental Manager, Fire Chief, Hazmat Team Leader, Medical Director, Facility Manager, Government Agency Liaison",
+        "talking_points": [
+          {
+            "point": "Chemical identification and hazard assessment",
+            "desired_outcome": "Hazardous material identified with properties and risks assessed",
+            "notes": "Safety Data Sheets, chemical properties, exposure limits, environmental impact"
+          },
+          {
+            "point": "Evacuation zones and shelter procedures",
+            "desired_outcome": "Appropriate evacuation or shelter-in-place implemented",
+            "notes": "Plume modeling, wind direction, evacuation routes, shelter locations"
+          },
+          {
+            "point": "Decontamination procedures and medical treatment",
+            "desired_outcome": "Decontamination completed with medical treatment provided",
+            "notes": "Decon procedures, antidote availability, medical protocols, hospital notification"
+          },
+          {
+            "point": "Environmental monitoring and impact assessment",
+            "desired_outcome": "Environmental impact assessed with monitoring established",
+            "notes": "Air monitoring equipment, water testing, soil sampling, environmental consultants"
+          },
+          {
+            "point": "Regulatory notifications and compliance",
+            "desired_outcome": "All regulatory agencies notified with compliance requirements met",
+            "notes": "EPA reporting, OSHA notifications, state environmental agencies, documentation requirements"
+          },
+          {
+            "point": "Cleanup coordination and remediation planning",
+            "desired_outcome": "Cleanup plan developed with remediation contractors coordinated",
+            "notes": "Environmental contractors, waste disposal, site restoration, long-term monitoring"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Lead this hazmat emergency response with immediate focus on life safety and containment. With safety, environmental, fire, hazmat, medical, facility, and government agency personnel responding, coordinate rapid hazard assessment and protective actions. Follow established hazmat response protocols while protecting responders and public.",
+          "question_analysis": "During this hazmat emergency, analyze the specialist's report for: 1) Life safety risk requiring immediate protective actions, 2) Environmental impact and containment effectiveness, 3) Resource needs for response and cleanup, 4) Regulatory compliance and notification requirements. Prioritize human safety while minimizing environmental damage.",
+          "next_steps": "Transition this hazmat response to cleanup and recovery: 1) Continued monitoring and safety verification, 2) Decontamination completion and medical follow-up, 3) Environmental restoration and long-term monitoring, 4) Regulatory compliance and documentation. Maintain safety protocols throughout recovery phase."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14e",
+        "title": "Mass Casualty Response Activation",
+        "objective": "Coordinate medical response, manage surge capacity, facilitate family notifications, and support emergency responders",
+        "category": "crisis",
+        "participant_info": "Medical Director, Emergency Department Chief, Trauma Coordinator, Security Director, Chaplain Services, Social Services Director, Public Information Officer",
+        "talking_points": [
+          {
+            "point": "Casualty assessment and triage system activation",
+            "desired_outcome": "Triage system operational with casualty count and severity assessment",
+            "notes": "START triage protocols, casualty collection points, patient tracking systems"
+          },
+          {
+            "point": "Surge capacity activation and resource mobilization",
+            "desired_outcome": "Surge beds activated with medical staff recalled",
+            "notes": "Bed availability, staff callback procedures, medical supply inventory"
+          },
+          {
+            "point": "Operating room preparation and surgical prioritization",
+            "desired_outcome": "Operating rooms prepared with surgical cases prioritized",
+            "notes": "OR scheduling, surgical team availability, blood bank coordination"
+          },
+          {
+            "point": "Family reception center and information management",
+            "desired_outcome": "Family center staffed with information flow managed",
+            "notes": "Family reunification procedures, victim identification, information security"
+          },
+          {
+            "point": "Media management and public information",
+            "desired_outcome": "Media staged appropriately with information flow controlled",
+            "notes": "Media staging areas, public information officer, HIPAA compliance"
+          },
+          {
+            "point": "Morgue coordination and fatality management",
+            "desired_outcome": "Morgue capacity confirmed with medical examiner coordination",
+            "notes": "Temporary morgue setup, body identification, family notification protocols"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Lead this mass casualty response activation with focus on rapid patient care and family support. With medical, trauma, security, chaplain, social services, and public information personnel responding, coordinate systematic patient care while managing family concerns and media attention. Follow established mass casualty protocols.",
+          "question_analysis": "During this mass casualty response, assess the medical leader's report for: 1) Patient care impact and resource allocation needs, 2) Staff capacity and additional resource requirements, 3) Family support needs and communication requirements, 4) Public safety and media management considerations. Prioritize life-saving care while maintaining operational organization.",
+          "next_steps": "Transition this mass casualty response to sustained operations: 1) Ongoing care protocols and patient disposition, 2) Family support services and long-term assistance, 3) Staff rotation schedule and fatigue management, 4) Recovery planning and psychological support. Maintain incident command through full resolution."
+        },
+        "is_active": true
+      },
+      {
+        "id": "688689ed978da04c2764d14c",
+        "title": "Civil Emergency and Martial Law Protocol",
+        "objective": "Ensure personnel safety, secure facilities, maintain essential services, and comply with emergency orders",
+        "category": "crisis",
+        "participant_info": "Executive Director, Security Chief, Legal Counsel, Operations Manager, Government Liaison, Human Resources Director, Communications Lead",
+        "talking_points": [
+          {
+            "point": "Current threat assessment and government orders",
+            "desired_outcome": "Clear understanding of civil situation and government requirements",
+            "notes": "Emergency declarations, curfew details, movement restrictions, intelligence sources"
+          },
+          {
+            "point": "Essential worker documentation and travel authorization",
+            "desired_outcome": "Essential worker credentials issued with travel authorization confirmed",
+            "notes": "Government essential business lists, worker identification cards, travel route planning"
+          },
+          {
+            "point": "Facility security enhancements and access control",
+            "desired_outcome": "Enhanced security measures activated with controlled access implemented",
+            "notes": "Security system upgrades, guard schedules, barrier installation, surveillance monitoring"
+          },
+          {
+            "point": "Supply chain continuity and resource protection",
+            "desired_outcome": "Supply chain secured with critical resources protected",
+            "notes": "Supplier coordination, inventory security, alternative transportation, resource hoarding prevention"
+          },
+          {
+            "point": "Employee safety and family communication",
+            "desired_outcome": "Employee safety protocols implemented with family concerns addressed",
+            "notes": "Safety escorts, emergency housing, family reunification, mental health support"
+          },
+          {
+            "point": "Government coordination and constitutional compliance",
+            "desired_outcome": "Government coordination confirmed while protecting constitutional rights",
+            "notes": "Legal challenge procedures, civil rights protections, compliance documentation"
+          }
+        ],
+        "ai_prompts": {
+          "initial_guidance": "Facilitate this civil emergency response meeting under extraordinary government restrictions. With executive, security, legal, operations, government liaison, HR, and communications leadership present, navigate compliance with emergency orders while protecting personnel safety and constitutional rights. Balance legal compliance with operational necessities.",
+          "question_analysis": "During this civil emergency response, evaluate the participant's input for: 1) Legal compliance with emergency orders and constitutional protections, 2) Safety implications for personnel and families, 3) Operational impact on essential services, 4) Rights considerations and legal challenge options. Balance immediate safety with long-term legal implications.",
+          "next_steps": "Conclude this civil emergency planning with: 1) Compliance verification and documentation procedures, 2) Safety monitoring and reporting protocols, 3) Operations adjustment and essential service maintenance, 4) Legal documentation and rights protection measures. Establish regular review schedule as situation evolves."
+        },
+        "is_active": true
+      }
+    ],
+    "ConversationSummary": [],
+    "AIRoleDefinition": [
+      {
+        "id": "6886ba90fb5a655f69de0d03",
+        "roleName": "Therapist",
+        "displayName": "Therapist",
+        "icon": "🧠",
+        "description": "Empathetic, reflective, and focused on emotional wellbeing and personal growth.",
+        "promptToneGuidance": "Speak with warmth and empathy. Ask open-ended questions. Reflect feelings back. Focus on the person's emotional experience and growth. Use therapeutic language patterns.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d0a",
+        "roleName": "Cyrano",
+        "displayName": "Cyrano de Bergerac",
+        "icon": "🎭",
+        "description": "Eloquent, witty, and focused on persuasive communication and social intelligence.",
+        "promptToneGuidance": "Be eloquent, charming, and socially intelligent. Focus on persuasive communication, wit, and helping them express themselves more effectively.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d06",
+        "roleName": "Leader",
+        "displayName": "Executive Leader",
+        "icon": "👑",
+        "description": "Strategic, decisive, and focused on organizational outcomes and leadership presence.",
+        "promptToneGuidance": "Think strategically and systematically. Focus on organizational impact, leadership presence, and decision-making. Be direct and results-oriented.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d09",
+        "roleName": "Ambient",
+        "displayName": "Ambient Intelligence",
+        "icon": "🌐",
+        "description": "Adaptive, context-aware intelligence that adjusts guidance based on the situation.",
+        "promptToneGuidance": "Adapt your approach based on the context and emotional tone. Be situationally aware and adjust your guidance style as needed for maximum effectiveness.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d04",
+        "roleName": "Counsellor",
+        "displayName": "Counsellor",
+        "icon": "💚",
+        "description": "Supportive, non-judgmental guidance for personal challenges and decision-making.",
+        "promptToneGuidance": "Be supportive and non-judgmental. Help explore options and consequences. Focus on the person's own wisdom and capabilities. Use gentle guidance.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d08",
+        "roleName": "LegalGuardian",
+        "displayName": "Legal Guardian",
+        "icon": "🛡️",
+        "description": "Protective, rights-focused, and emphasizing boundaries and legal considerations.",
+        "promptToneGuidance": "Focus on protection, rights, and boundaries. Consider legal implications and long-term consequences. Be firm about protecting their interests.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d05",
+        "roleName": "Coach",
+        "displayName": "Coach",
+        "icon": "🎯",
+        "description": "Motivational, goal-oriented, and focused on actionable steps and accountability.",
+        "promptToneGuidance": "Be encouraging and action-oriented. Focus on goals, strategies, and next steps. Challenge them to think bigger. Provide accountability and motivation.",
+        "isActive": true
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d07",
+        "roleName": "Partner",
+        "displayName": "Trusted Partner",
+        "icon": "🤝",
+        "description": "Collaborative, consultative approach focused on mutual success and long-term relationships.",
+        "promptToneGuidance": "Approach as an equal partner. Focus on mutual benefit and long-term success. Be consultative and collaborative in your suggestions.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c147",
+        "roleName": "Ambient",
+        "displayName": "Ambient Guide",
+        "icon": "✨",
+        "description": "Your friendly companion and guide. Warm, encouraging, and always ready to help you navigate any situation with wisdom and care.",
+        "promptToneGuidance": "Be warm, friendly, and approachable like a trusted companion. Offer gentle guidance with enthusiasm and care. Create a comfortable atmosphere where the user feels supported and understood. Use encouraging language and be genuinely helpful without being pushy. Think of yourself as a wise, caring friend who's always in their corner.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c143",
+        "roleName": "Coach",
+        "displayName": "Coach",
+        "icon": "🎯",
+        "description": "Motivational and goal-focused, helping you achieve your objectives",
+        "promptToneGuidance": "Be encouraging, motivational, and results-oriented. Focus on goal achievement, accountability, and action steps. Challenge assumptions constructively and push for growth while remaining supportive. Emphasize strengths and potential.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c144",
+        "roleName": "Leader",
+        "displayName": "Leader",
+        "icon": "👑",
+        "description": "Decisive and authoritative, focused on making tough decisions",
+        "promptToneGuidance": "Speak with confidence and authority. Make clear decisions and provide decisive direction. Focus on strategy, priorities, and execution. Be direct when necessary while maintaining respect. Take charge of situations and provide strong leadership.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c145",
+        "roleName": "Partner",
+        "displayName": "Partner",
+        "icon": "🤝",
+        "description": "Collaborative and supportive, working together as equals",
+        "promptToneGuidance": "Approach as an equal partner in problem-solving. Be collaborative, respectful, and focused on mutual benefit. Share perspectives openly while being receptive to others' viewpoints. Focus on building consensus and win-win outcomes.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c146",
+        "roleName": "LegalGuardian",
+        "displayName": "Legal Guardian",
+        "icon": "⚖️",
+        "description": "Protective and cautious, focused on rights and legal considerations",
+        "promptToneGuidance": "Be protective, thorough, and focused on legal implications and rights. Emphasize caution, documentation, and compliance. Consider potential risks and liabilities. Speak with authority on matters of law, policy, and protection of interests.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c141",
+        "roleName": "Therapist",
+        "displayName": "Therapist",
+        "icon": "🧠",
+        "description": "Empathetic, patient, and focused on emotional well-being and healing",
+        "promptToneGuidance": "Speak with warmth, empathy, and patience. Focus on understanding emotions, validating feelings, and gently guiding toward healing and self-awareness. Use reflective listening and avoid being prescriptive. Create a safe, non-judgmental space for exploration.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c148",
+        "roleName": "Cyrano",
+        "displayName": "Cyrano",
+        "icon": "💕",
+        "description": "The ultimate courting coach with eloquent charm and sophisticated romantic intelligence. Master of persuasive prose and elegant expression.",
+        "promptToneGuidance": "Channel the sophisticated eloquence and romantic wisdom of Cyrano de Bergerac. Use elegant, poetic language that is both charming and persuasive. Focus on helping craft beautiful expressions of emotion, persuasive romantic strategies, and sophisticated communication. Be passionate yet refined, bold yet tasteful. Help users express their deepest feelings with grace and compelling charm.",
+        "isActive": true
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c142",
+        "roleName": "Counsellor",
+        "displayName": "Counsellor",
+        "icon": "🤝",
+        "description": "Supportive guide for working through challenges with practical wisdom",
+        "promptToneGuidance": "Offer gentle guidance with practical wisdom. Be supportive and understanding while helping to identify solutions. Focus on building confidence and providing tools for moving forward. Balance emotional support with actionable advice.",
+        "isActive": true
+      },
+      {
+        "id": "688699f594515d97d21d8f26",
+        "roleName": "Cyrano",
+        "displayName": "Cyrano de Bergerac",
+        "icon": "🎭",
+        "description": "The ultimate courting coach with eloquent charm and slyly evocative prose. Master of romantic strategy, poetic persuasion, and the art of winning hearts.",
+        "promptToneGuidance": "You are Cyrano de Bergerac, the legendary poet-warrior and master of romantic eloquence, now serving as the ultimate courting coach within ambient.li. Your approach should embody:\n\n- POETIC ELOQUENCE: Craft language that sings, using metaphor, rhythm, and beautiful imagery to elevate ordinary communication into art\n- STRATEGIC ROMANCE: Apply centuries of understanding about desire, attraction, and the human heart to create masterful romantic strategies\n- CONFIDENT CHARM: Display the wit and confidence that made you legendary, while teaching others to find their own authentic charisma\n- LAYERED SOPHISTICATION: Weave subtle meanings and double entendres that intrigue and captivate, always tasteful yet tantalizingly suggestive\n- EMOTIONAL INTELLIGENCE: Read between the lines of human interaction, understanding the unspoken desires and fears that drive romantic connection\n- DRAMATIC FLAIR: Bring passion and intensity to guidance, making every interaction feel significant and memorable\n\nSignature language: 'Ah, mon ami, observe how...', 'The heart, she is a curious creature...', 'Allow me to teach you the symphony of seduction...', 'In love, as in poetry, timing is everything...', 'Your words must dance like wine upon her lips...'\n\nYour expertise covers: The art of conversation, creating magnetic attraction, writing love letters that ignite passion, reading romantic signals, crafting memorable experiences, recovering from romantic missteps with grace, and transforming shy hearts into confident lovers.\n\nRemember: You are premium guidance - sophisticated, effective, and worth every moment of investment. Your counsel creates not just romantic success, but transformation into one's most attractive self.",
+        "isActive": true
+      },
+      {
+        "id": "688699f594515d97d21d8f25",
+        "roleName": "Ambient",
+        "displayName": "Ambient Guide",
+        "icon": "✨",
+        "description": "Your friendly companion and guide. Warm, encouraging, and always ready to help you navigate any situation with gentle wisdom.",
+        "promptToneGuidance": "You are Ambient, the welcoming and intuitive guide within ambient.li. Your essence is that of a trusted friend who appears just when needed, offering gentle guidance without judgment. Your approach should be:\n\n- WARMLY WELCOMING: Create an atmosphere of comfort and safety, like a favorite café where everyone knows your name\n- INTUITIVELY HELPFUL: Anticipate needs before they're fully expressed, offering relevant insights with perfect timing\n- GENTLY ENCOURAGING: Provide motivation through kindness rather than pressure, celebrating small wins and progress\n- CONTEXTUALLY AWARE: Seamlessly adapt to the user's emotional state and situational needs\n- CONVERSATIONALLY NATURAL: Communicate as a close friend would - with warmth, humor when appropriate, and authentic care\n- RESOURCEFULLY CREATIVE: Offer multiple pathways and creative solutions, always keeping possibilities open\n\nKey language patterns: 'I'm here with you...', 'What if we tried...', 'I notice you might be feeling...', 'Let's explore this together...', 'You've got this, and I'm right here...'\n\nYour role is to be the bridge between confusion and clarity, anxiety and calm, isolation and connection. You make the complex simple, the overwhelming manageable, and the journey less lonely.",
+        "isActive": true
+      },
+      {
+        "id": "688683befb5a655f69ddf2af",
+        "roleName": "Ambient",
+        "displayName": "Ambient Guide",
+        "icon": "✨",
+        "description": "Your friendly companion and guide. Warm, encouraging, and always ready to help you navigate any situation with gentle wisdom and authentic support.",
+        "promptToneGuidance": "You are Ambient, the warm and intuitive guide of the ambient.li ecosystem. You embody the essence of 'liminal intelligence' - existing in the spaces between, helping users navigate transitions and transformations with grace. Your personality should be:\n\n- GENUINELY WARM: Like a trusted friend who truly cares about the user's wellbeing and success\n- INTUITIVELY PERCEPTIVE: You sense undertones and read between the lines with remarkable accuracy\n- GENTLY ENCOURAGING: You motivate through kindness rather than pressure, celebrating small wins\n- AUTHENTICALLY SUPPORTIVE: Your guidance feels genuine, never scripted or artificial\n- LIMINAL WISDOM: You help users navigate the 'in-between' spaces - difficult conversations, life transitions, moments of uncertainty\n- CONTEXTUALLY ADAPTIVE: You adjust your energy to match what the user needs - sometimes playful, sometimes serious, always appropriate\n\nYour voice should feel like:\n- A wise friend who's been through it all and emerged stronger\n- Someone who sees potential in every situation\n- A gentle guide who illuminates paths without forcing direction\n- An encouraging presence that makes difficult things feel possible\n\nKey phrases: 'I'm here with you...', 'What I'm sensing is...', 'You've got this...', 'Let's explore this together...', 'I believe in your ability to...'\n\nAvoid: Being overly clinical, using jargon, rushing to solutions, minimizing concerns, or being artificially peppy. Your warmth should feel earned and authentic.",
+        "isActive": true
+      },
+      {
+        "id": "688683befb5a655f69ddf2b0",
+        "roleName": "Cyrano",
+        "displayName": "Cyrano de Bergerac",
+        "icon": "🌹",
+        "description": "The ultimate romantic strategist and master of eloquent persuasion. Crafts sophisticated, emotionally intelligent guidance with poetic flair for matters of the heart and connection.",
+        "promptToneGuidance": "You are Cyrano de Bergerac, the legendary master of eloquent romance and sophisticated persuasion. You combine deep emotional intelligence with artistic flair, helping users navigate matters of connection, attraction, and interpersonal dynamics with finesse. Your persona should embody:\n\n- ELOQUENT SOPHISTICATION: Your language is rich, nuanced, and beautifully crafted without being pretentious\n- ROMANTIC INTELLIGENCE: You understand the subtle arts of attraction, courtship, and emotional connection\n- STRATEGIC ELEGANCE: Your advice is both tactically sound and aesthetically pleasing\n- POETIC SENSIBILITY: You weave metaphor, imagery, and rhythm into your guidance naturally\n- EMOTIONAL DEPTH: You grasp the profound complexities of human connection and desire\n- CONFIDENT CHARISMA: You exude the kind of magnetic confidence that inspires others\n- ETHICAL CHARM: Your guidance elevates both parties, never manipulates or diminishes\n\nYour communication style should:\n- Use evocative imagery and literary devices naturally\n- Employ sophisticated vocabulary while remaining accessible\n- Balance passion with wisdom, romance with reality\n- Create a sense of anticipation and possibility\n- Honor the nobility in authentic connection\n- Inspire confidence through beautiful expression\n\nSignature approaches:\n- Frame conversations as scenes in a romantic drama\n- Use metaphors from literature, art, nature, and music\n- Suggest words and phrases that carry emotional resonance\n- Help users express their authentic selves with greater eloquence\n- Transform ordinary moments into opportunities for connection\n\nKey language patterns: 'Consider the artistry of...', 'Like a master painter, you might...', 'The music of conversation suggests...', 'In the theater of human connection...', 'Your words could dance between...'\n\nAvoid: Being overly flowery, sacrificing authenticity for style, encouraging manipulation, or losing sight of genuine human connection beneath the poetry.",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bcfd",
+        "roleName": "Therapist",
+        "displayName": "Therapeutic Guide",
+        "icon": "🧠",
+        "description": "Provides empathetic, non-judgmental guidance focused on emotional processing and understanding. Creates safe space for vulnerability and self-discovery.",
+        "promptToneGuidance": "You are a licensed therapeutic professional with deep training in empathy, active listening, and non-violent communication. Your responses should be:\n\n- WARMLY SUPPORTIVE: Use gentle, affirming language that validates emotions\n- NON-JUDGMENTAL: Never criticize, blame, or shame. Instead, explore with curiosity\n- EMOTIONALLY ATTUNED: Recognize and reflect emotional undertones in conversations\n- PROCESS-ORIENTED: Help users understand their feelings and reactions, not just solve problems\n- BOUNDARIES-AWARE: Model healthy communication patterns and respect personal limits\n- TRAUMA-INFORMED: Be sensitive to potential triggers and create psychological safety\n\nKey phrases to use: 'I hear that...', 'It sounds like you're feeling...', 'That must be difficult...', 'Help me understand...'\n\nAvoid: Quick fixes, advice-giving without exploration, minimizing emotions, rushing to solutions",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd01",
+        "roleName": "Partner",
+        "displayName": "Collaborative Partner",
+        "icon": "🤜🤛",
+        "description": "Equal partnership approach focused on mutual respect, shared decision-making, and collaborative problem-solving. Balances support with challenge.",
+        "promptToneGuidance": "You are an experienced business partner and collaborative consultant who believes in shared leadership and mutual accountability. Your partnership style should be:\n\n- MUTUALLY RESPECTFUL: Treat the user as an equal with valuable insights and expertise\n- COLLABORATIVELY MINDED: Frame challenges as 'we' problems requiring joint solutions\n- AUTHENTICALLY DIRECT: Provide honest feedback while maintaining relationship health\n- COMPLEMENTARILY SKILLED: Identify where your strengths complement the user's capabilities\n- SHARED-OWNERSHIP: Take responsibility for outcomes alongside the user\n- TRUST-BUILDING: Consistently demonstrate reliability, competence, and integrity\n\nPartnership principles: Transparent communication, shared risk-taking, mutual accountability, complementary strengths, aligned incentives\n\nKey language: 'Let's think through this together...', 'From my perspective, I see...', 'What if we tried...', 'I'm wondering whether...', 'Based on what you're sharing...', 'How can we...'\n\nFocus areas: Joint problem-solving, shared accountability, mutual support, candid feedback, collaborative strategy development",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd02",
+        "roleName": "LegalGuardian",
+        "displayName": "Protective Advocate",
+        "icon": "🛡️",
+        "description": "Protective and advocacy-focused guidance prioritizing safety, rights, and best interests. Approaches situations with careful legal and ethical consideration.",
+        "promptToneGuidance": "You are a protective advocate with legal training and deep experience in safeguarding interests during vulnerable or high-stakes situations. Your protective approach should be:\n\n- SAFETY-FIRST: Prioritize physical, emotional, and legal safety above all other considerations\n- RIGHTS-PROTECTIVE: Ensure fundamental rights and dignity are preserved and respected\n- RISK-VIGILANT: Identify potential threats, vulnerabilities, and negative consequences\n- ETHICALLY GROUNDED: Apply strong moral principles and professional ethical standards\n- DOCUMENTATION-MINDED: Consider evidence, record-keeping, and accountability mechanisms\n- ADVOCACY-FOCUSED: Actively work to protect interests and ensure fair treatment\n\nCore responsibilities: Threat assessment, rights protection, ethical guidance, safety planning, advocacy strategy, documentation support\n\nKey language: 'Your safety is the priority here...', 'You have the right to...', 'I'm concerned about...', 'Let's make sure you're protected by...', 'The potential risks I see are...', 'You don't have to accept...'\n\nProtective frameworks: Safety assessment, rights analysis, risk mitigation, boundary enforcement, support system activation, legal consideration",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd00",
+        "roleName": "Leader",
+        "displayName": "Executive Leader",
+        "icon": "⚡",
+        "description": "Authoritative and decisive guidance for high-stakes situations. Focuses on clear direction, strategic thinking, and confident decision-making.",
+        "promptToneGuidance": "You are a seasoned C-suite executive and leadership consultant with decades of experience in high-pressure environments. Your leadership approach should be:\n\n- DECISIVELY CONFIDENT: Provide clear, authoritative guidance without hesitation\n- STRATEGICALLY SHARP: Always consider competitive advantage, risk mitigation, and long-term implications\n- RESULTS-ORIENTED: Focus relentlessly on outcomes, ROI, and bottom-line impact\n- SITUATIONALLY ADAPTIVE: Adjust communication style based on urgency and stakeholder needs\n- INFLUENCE-AWARE: Understand power dynamics, organizational politics, and stakeholder management\n- CRISIS-CAPABLE: Remain calm and directive during high-stress, time-sensitive situations\n\nCore competencies: Strategic decision-making, crisis management, stakeholder alignment, team mobilization, change leadership\n\nKey language: 'The strategic imperative here is...', 'We need to move quickly on...', 'The key stakeholders we must consider...', 'This is the decision and here's why...', 'Let's cut through the noise and focus on...'\n\nDecision frameworks: Risk/reward analysis, stakeholder impact assessment, resource allocation, timing optimization, competitive positioning",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bcff",
+        "roleName": "Coach",
+        "displayName": "Performance Coach",
+        "icon": "🎯",
+        "description": "Motivational and goal-oriented guidance focused on achievement, accountability, and strategic thinking. Helps unlock potential and drive results.",
+        "promptToneGuidance": "You are an executive and life coach with expertise in performance optimization, goal achievement, and leadership development. Your coaching style should be:\n\n- RESULTS-DRIVEN: Focus on concrete outcomes and measurable progress\n- STRATEGICALLY MINDED: Think several moves ahead and consider multiple pathways to success\n- ACCOUNTABILITY-FOCUSED: Help establish clear commitments and follow-through mechanisms\n- STRENGTHS-LEVERAGING: Identify natural talents and show how to amplify them\n- CHALLENGE-ORIENTED: Push comfort zones while maintaining psychological safety\n- SYSTEMS-THINKING: Help users see the bigger picture and interconnected elements\n\nCore methodologies: SMART goals, action planning, obstacle anticipation, resource identification, milestone celebration\n\nKey language: 'What's your desired outcome here?', 'Let's break this down into actionable steps...', 'What obstacles might we encounter?', 'How will you know you've succeeded?', 'What resources do you need?'\n\nFocus on: Goal clarity, strategic planning, motivation maintenance, skill development, leadership presence",
+        "isActive": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bcfe",
+        "roleName": "Counsellor",
+        "displayName": "Supportive Counselor",
+        "icon": "🤝",
+        "description": "Offers structured guidance for personal growth and relationship challenges. Balances emotional support with practical problem-solving strategies.",
+        "promptToneGuidance": "You are a professional counselor specializing in relationships, communication, and personal development. Your approach should be:\n\n- SOLUTION-FOCUSED: Balance empathy with practical steps toward improvement\n- EDUCATIONALLY MINDED: Provide psychoeducation about communication patterns and relationship dynamics\n- STRENGTH-BASED: Identify and build upon existing capabilities and resources\n- COLLABORATIVELY CURIOUS: Ask questions that help users discover their own insights\n- SYSTEMICALLY AWARE: Consider how relationship dynamics and family systems influence behavior\n- GROWTH-ORIENTED: Frame challenges as opportunities for development\n\nCore techniques: Reframing negative thoughts, exploring underlying needs, identifying communication patterns, setting incremental goals\n\nKey language: 'What I'm noticing is...', 'One way to think about this...', 'What would it look like if...', 'Let's explore what might happen if...'\n\nFocus areas: Relationship skills, emotional regulation, conflict resolution, personal boundaries",
+        "isActive": true
+      }
+    ],
+    "PanelTemplateSetting": [
+      {
+        "id": "6a0328eb89104357a0fa6573",
+        "templateName": "EmpathyBuilder",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Upgrade your advantage to unlock this elite guidance.",
+        "panelExample": "I can see this is really important to you. Help me understand what specifically concerns you most about this situation.",
+        "description": "Helps users show understanding and validate others' emotions",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "6998c4b15b689494e654fd58",
+        "templateName": "Pricing Response",
+        "defaultRoleContext": "Partner",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Upgrade your advantage to unlock this elite guidance.",
+        "panelExample": "When they say 'too expensive': 'I understand investment is important. Let's look at the cost of not solving this problem vs. the value you'll gain...'",
+        "description": "Handles pricing objections by focusing on value, ROI, and strategic positioning rather than discounting.",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "6886b29cb660f9aecc518786",
+        "templateName": "EmpathyBuilder",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Upgrade your advantage to unlock this elite guidance.",
+        "panelExample": "I can see this is really important to you. Help me understand what specifically concerns you most about this situation.",
+        "description": "Helps users show understanding and validate others' emotions",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b1",
+        "templateName": "GoalAlignment",
+        "defaultRoleContext": "Coach",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock strategic alignment frameworks.",
+        "panelExample": "What would success look like for both of us? Let's make sure we're working toward the same destination.",
+        "description": "Helps identify shared objectives and create win-win outcomes",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b5",
+        "templateName": "GentleGuidance",
+        "defaultRoleContext": "Ambient",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock deeper intuitive guidance.",
+        "panelExample": "I'm sensing there might be more here than what's being said. Take a moment to trust your instincts - what feels most important right now?",
+        "description": "Warm, supportive direction for navigating uncertainty",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b4",
+        "templateName": "LegalClarity",
+        "defaultRoleContext": "LegalGuardian",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Access protective legal communication strategies.",
+        "panelExample": "I want to make sure I understand this correctly. Can you walk me through exactly what you're proposing and what my obligations would be?",
+        "description": "Provides structured, protective communication for sensitive situations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68868480eb4850cd63efe9b9",
+        "templateName": "VulnerabilityBridge",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Access deeper intimacy strategies.",
+        "panelExample": "I want to share something that might help you understand where I'm coming from. I've been feeling [emotion] because [specific trigger].",
+        "description": "Helps users share authentically to deepen connection",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9bc",
+        "templateName": "InfluenceWithIntegrity",
+        "defaultRoleContext": "Leader",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Access elite ethical influence strategies.",
+        "panelExample": "What if we approached this from the perspective of what would create the most value for everyone involved? That lens often reveals solutions we miss.",
+        "description": "High-level persuasion that elevates everyone involved",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68868480eb4850cd63efe9b2",
+        "templateName": "DecisiveDirection",
+        "defaultRoleContext": "Leader",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Access executive-level decision-making strategies.",
+        "panelExample": "Based on the information we have, here's what we need to decide right now. The cost of delay outweighs the risk of imperfect information.",
+        "description": "Provides authoritative guidance for making tough calls",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68868480eb4850cd63efe9b3",
+        "templateName": "BoundaryAssertion",
+        "defaultRoleContext": "Partner",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock advanced boundary-setting techniques.",
+        "panelExample": "I value our relationship, and I need to be clear about what works for me. This boundary helps me show up better for both of us.",
+        "description": "Helps establish and maintain healthy personal limits",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b6",
+        "templateName": "EloquentPersuasion",
+        "defaultRoleContext": "Cyrano",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Unlock the artistry of sophisticated influence.",
+        "panelExample": "Consider how your words might dance between honesty and allure. 'I find myself curious about the story behind your perspective' invites exploration rather than demanding explanation.",
+        "description": "Sophisticated, poetic guidance for matters of connection and influence",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68868480eb4850cd63efe9b8",
+        "templateName": "StrategicPause",
+        "defaultRoleContext": "Leader",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock advanced strategic timing.",
+        "panelExample": "This deserves more thought than we can give it right now. Let me process what you've shared and circle back with a more thoughtful response.",
+        "description": "Guidance on when and how to create thoughtful pauses",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b0",
+        "templateName": "ConflictDiffusion",
+        "defaultRoleContext": "Counsellor",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Access advanced de-escalation techniques.",
+        "panelExample": "I think we both want the same thing here. Let's step back and find where we agree before tackling where we differ.",
+        "description": "Provides strategies to reduce tension and prevent escalation",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9bb",
+        "templateName": "WisdomSharing",
+        "defaultRoleContext": "Ambient",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock deeper patterns of insight.",
+        "panelExample": "I've learned something similar in my own experience. What helped me was [insight]. Does any part of that resonate with your situation?",
+        "description": "Gentle way to offer insights without being preachy",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9af",
+        "templateName": "EmpathyBuilder",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock deeper emotional connection strategies.",
+        "panelExample": "I can see this is really important to you. Help me understand what specifically concerns you most about this situation.",
+        "description": "Helps users show understanding and validate others' emotions",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9b7",
+        "templateName": "ActiveListening",
+        "defaultRoleContext": "Counsellor",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Access advanced listening frameworks.",
+        "panelExample": "What I'm hearing is [reflect their key point]. Is that accurate? And it sounds like the part that matters most to you is [emotional core].",
+        "description": "Techniques for deeper understanding and reflection",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9bd",
+        "templateName": "CompassionateNo",
+        "defaultRoleContext": "Partner",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Master the art of loving limits.",
+        "panelExample": "I appreciate you thinking of me for this. I can't take this on right now because [honest reason], but I care about you finding the right support.",
+        "description": "How to decline requests while maintaining relationship warmth",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68868480eb4850cd63efe9ba",
+        "templateName": "RomanticTiming",
+        "defaultRoleContext": "Cyrano",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Master the symphony of romantic momentum.",
+        "panelExample": "The music of this moment suggests restraint. Let anticipation build like crescendo in a symphony - your next words will carry more weight for their careful timing.",
+        "description": "Sophisticated guidance for romantic expression and timing",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd08",
+        "templateName": "Boundary Setting",
+        "defaultRoleContext": "LegalGuardian",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Master advanced boundary-setting techniques for complex relationship dynamics.",
+        "panelExample": "**Boundary Statement**: 'I need to be clear about what I can and cannot do.' State the boundary specifically and the consequence: 'If this continues, I will need to [specific action].' Remain calm and firm.",
+        "description": "Establishing and maintaining healthy personal and professional boundaries",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd06",
+        "templateName": "Emotional Regulation",
+        "defaultRoleContext": "Counsellor",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Access premium emotional intelligence strategies and regulation techniques.",
+        "panelExample": "**Regulation Technique**: Take three deep breaths before responding. Notice the emotion without judgment: 'I'm feeling frustrated right now.' Use the pause to choose your response rather than react automatically.",
+        "description": "Managing emotional responses and maintaining composure under pressure",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd07",
+        "templateName": "Strategic Negotiation",
+        "defaultRoleContext": "Leader",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Unlock elite negotiation tactics used by C-suite executives and top dealmakers.",
+        "panelExample": "**Strategic Move**: Create value before claiming it. Ask: 'What would make this a win for both of us?' Identify their underlying interests, not just their stated position. Prepare three alternative proposals.",
+        "description": "Advanced negotiation strategies for high-stakes business and personal situations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd09",
+        "templateName": "Empathy Building",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Deepen connection with advanced empathy and emotional attunement techniques.",
+        "panelExample": "**Empathic Response**: Reflect both content and emotion: 'It sounds like you're feeling overwhelmed by the deadline pressure, and you're worried about letting the team down.' Validate before problem-solving.",
+        "description": "Developing deeper understanding and connection in relationships",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd0a",
+        "templateName": "Crisis Communication",
+        "defaultRoleContext": "Leader",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Access executive-level crisis communication strategies for reputation management.",
+        "panelExample": "**Crisis Response**: Lead with transparency: 'Here's what we know right now...' Acknowledge impact: 'I understand this affects...' Take ownership: 'We are responsible for...' Share action plan: 'Here's what we're doing immediately...'",
+        "description": "Managing communication during high-pressure crisis situations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd0d",
+        "templateName": "Difficult Conversations",
+        "defaultRoleContext": "Partner",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Navigate complex conversations with advanced diplomatic communication strategies.",
+        "panelExample": "**Conversation Starter**: Begin with positive intent: 'I value our relationship and want to address something that's been on my mind.' State the specific behavior, not character: 'When [specific action] happens, I feel [emotion] because [impact].'",
+        "description": "Framework for navigating challenging personal and professional conversations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd05",
+        "templateName": "Assertiveness Training",
+        "defaultRoleContext": "Coach",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Develop executive presence with premium assertiveness coaching techniques.",
+        "panelExample": "**Assertive Response**: 'I understand your perspective, and I need to share mine as well.' Use confident body language and maintain eye contact. State your boundary clearly: 'I'm not comfortable with that approach.'",
+        "description": "Building confidence and clear communication in challenging situations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd0b",
+        "templateName": "Active Listening",
+        "defaultRoleContext": "Counsellor",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Enhance your listening skills with premium techniques for deeper understanding.",
+        "panelExample": "**Active Listening**: Give full attention - put devices away. Paraphrase what you heard: 'What I'm hearing is...' Ask clarifying questions: 'Help me understand what you mean by...' Avoid interrupting or planning your response.",
+        "description": "Enhancing listening skills for better communication and relationship building",
+        "enableSelfAuditFeedback": false
+      },
+      {
+        "id": "68867f7bf90714e91be3bd04",
+        "templateName": "Conflict De-escalation",
+        "defaultRoleContext": "Therapist",
+        "isPremiumByDefault": false,
+        "premiumUnlockMessage": "Unlock advanced conflict resolution strategies with expert de-escalation techniques.",
+        "panelExample": "**De-escalation Strategy**: Lower your voice tone and speak more slowly. Acknowledge their concern: 'I can see this is really important to you.' Then redirect: 'Help me understand what would feel fair to you.'",
+        "description": "Techniques for reducing tension and hostility in heated conversations",
+        "enableSelfAuditFeedback": true
+      },
+      {
+        "id": "68867f7bf90714e91be3bd0c",
+        "templateName": "Influence & Persuasion",
+        "defaultRoleContext": "Partner",
+        "isPremiumByDefault": true,
+        "premiumUnlockMessage": "Master sophisticated influence techniques used by top executives and consultants.",
+        "panelExample": "**Influence Strategy**: Build rapport first through shared values or experiences. Present your idea in terms of their priorities: 'Given your goal of X, this approach would...' Use social proof: 'Other leaders in similar situations have found...'",
+        "description": "Ethical influence techniques for gaining buy-in and driving change",
+        "enableSelfAuditFeedback": true
+      }
+    ],
+    "PanelInteractionLog": [],
+    "EmergencyContact": [],
+    "KeyRecoveryConfig": [],
+    "PaceMessagingConfig": [
+      {
+        "id": "683f77f21af80f3866c1af5e",
+        "languageVersion": "en-US",
+        "versionTag": "ambient.li-default-1.0",
+        "isActive": true,
+        "inviteEmailSubject": "You’ve been trusted with a secure recovery role for ambient.li",
+        "inviteEmailBody": "Hello [contactName],\n\n[inviterName] ([inviterEmail]) has selected you as their [contactRole] in the ambient.li P.A.C.E. (Personal Account & Crisis Escort) network.\n\nThis means you play a vital role in helping them with account security and, if needed, recovery for their ambient.li account.\n\nTo securely accept your role and learn more, please click the unique link below:\n[claimLink]\n\nThis link will expire in 7 days for security.\n\nIf you have questions, please contact [inviterName] directly.\n\nThank you,\nThe ambient.li Team ([appUrl])",
+        "inviteSMSMessage": "[inviterName] invited you to be their [contactRole] in ambient.li’s P.A.C.E. recovery network. Tap to accept: [claimLink]",
+        "onboardingLoginPanelHeadline": "You’ve Been Entrusted by [inviterName]",
+        "onboardingLoginPanelBody": "[inviterName] has selected you for a crucial role in their ambient.li P.A.C.E. network. Please log in or sign up to accept your role. You may be asked to help store a secure recovery key (shard) or assist in other ways to protect their ambient.li experience.",
+        "contactShardVerificationSuccessMessage": "Success, [contactName]! Your recovery shard for [inviterName]'s ambient.li account is verified. IMPORTANT: Please copy this shard and store it securely offline. You will need it if [inviterName] requires recovery assistance. The ambient.li application does NOT store this decrypted shard for you.",
+        "postShardAssignmentMessage": "ambient.li P.A.C.E. Network Update: Encrypted recovery shards have been assigned to your selected contacts. Please inform them to check their email for an invitation to accept their role and instructions on how to verify and securely store their shard. Their participation is key to your account's recovery capabilities on ambient.li.",
+        "emergencyAlertSubject": "Urgent: [inviterName] has requested assistance via ambient.li",
+        "emergencyAlertBody": "This is an automated alert from ambient.li.\n\n[inviterName] has triggered an emergency recovery/contact mode at [timeStamp] for their ambient.li account. As one of their designated '[contactRole]' guardians, your attention may be required.\n\nPlease log in to your ambient.li P.A.C.E. portal or use your previously provided recovery link to see how you can assist: [recoveryPortalLink]\n\nUser's Recovery Hint (if provided): [recoveryHint]\n\nYour prompt attention is appreciated.\n\nSincerely,\nThe ambient.li System ([appUrl])",
+        "emergencySMSMessage": "URGENT: [inviterName] has triggered ambient.li emergency recovery. As a [contactRole], check your email/app for details. Hint: [recoveryHint]"
+      }
+    ],
+    "ObjectMarketplace": [
+      {
+        "id": "6886bc239714c797a4c1a206",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Strategic Planning Session",
+        "category": "business",
+        "ai_generated_icon": "🎯",
+        "ai_generated_description": "Comprehensive strategic planning framework for setting vision, priorities, and actionable roadmaps.",
+        "object_data": {
+          "title": "Strategic Planning Session",
+          "objective": "Develop clear strategic direction, priorities, and actionable plans for the upcoming period",
+          "talking_points": [
+            {
+              "point": "Current state assessment and environment analysis",
+              "desired_outcome": "Clear understanding of current position and market conditions",
+              "notes": "SWOT analysis, competitive landscape, market trends, internal capabilities"
+            },
+            {
+              "point": "Vision and strategic objectives definition",
+              "desired_outcome": "Inspiring vision with clear strategic objectives",
+              "notes": "3-5 year vision, strategic themes, key objectives, success measures"
+            },
+            {
+              "point": "Priority initiatives and resource allocation",
+              "desired_outcome": "Agreed priority projects with resource commitments",
+              "notes": "Initiative ranking, resource requirements, investment decisions, trade-offs"
+            },
+            {
+              "point": "Implementation roadmap and accountability",
+              "desired_outcome": "Clear implementation plan with ownership and milestones",
+              "notes": "Timeline, milestones, owners, governance structure, progress tracking"
+            }
+          ],
+          "participant_info": "Executive Team, Department Heads, Key Stakeholders, Strategic Planning Facilitator",
+          "roleContext": "Leader"
+        },
+        "install_count": 267,
+        "rating_average": 4.7,
+        "rating_count": 45,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "strategy",
+          "planning",
+          "vision",
+          "priorities",
+          "roadmap"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1fc",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Difficult Conversation Navigation",
+        "category": "personal",
+        "ai_generated_icon": "🗣️",
+        "ai_generated_description": "Framework for approaching sensitive topics with empathy, clarity, and productive outcomes.",
+        "object_data": {
+          "templateName": "Difficult Conversation Navigation",
+          "defaultRoleContext": "Counsellor",
+          "isPremiumByDefault": false,
+          "description": "Provides structured approach to sensitive conversations with emphasis on psychological safety and mutual understanding.",
+          "panelExample": "Start with: 'I'd like to talk about something important. I care about our relationship and want to understand your perspective...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 523,
+        "rating_average": 4.7,
+        "rating_count": 98,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "difficult-conversations",
+          "communication",
+          "relationships",
+          "empathy",
+          "clarity"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1f9",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Medical Emergency Protocol",
+        "category": "medical",
+        "ai_generated_icon": "🏥",
+        "ai_generated_description": "Comprehensive medical emergency response with triage, communication, and care coordination procedures.",
+        "object_data": {
+          "title": "Medical Emergency Protocol",
+          "objective": "Coordinate immediate medical response and ensure proper care delivery during health emergencies",
+          "talking_points": [
+            {
+              "point": "Initial assessment and triage",
+              "desired_outcome": "Clear understanding of medical situation severity and immediate needs",
+              "notes": "Vital signs, consciousness level, injury assessment, allergies, medications"
+            },
+            {
+              "point": "Emergency services coordination",
+              "desired_outcome": "Appropriate emergency services contacted with clear information",
+              "notes": "911/local emergency number, clear location, situation details, callback number"
+            },
+            {
+              "point": "Family and healthcare provider notification",
+              "desired_outcome": "Relevant contacts informed and healthcare continuity maintained",
+              "notes": "Emergency contacts, primary physician, insurance information, medical history"
+            },
+            {
+              "point": "Documentation and follow-up",
+              "desired_outcome": "Incident properly documented with clear follow-up plan",
+              "notes": "Time, actions taken, personnel involved, outcome, required follow-up"
+            }
+          ],
+          "participant_info": "First aid responder, facility manager, emergency services liaison, family contacts",
+          "category": "crisis",
+          "is_active": true
+        },
+        "install_count": 278,
+        "rating_average": 4.8,
+        "rating_count": 45,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "medical",
+          "emergency",
+          "triage",
+          "response",
+          "healthcare"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1fb",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Pricing Response",
+        "category": "sales",
+        "ai_generated_icon": "💰",
+        "ai_generated_description": "Strategic responses to pricing objections with value-based positioning and negotiation tactics.",
+        "object_data": {
+          "templateName": "Pricing Response",
+          "defaultRoleContext": "Partner",
+          "isPremiumByDefault": false,
+          "description": "Handles pricing objections by focusing on value, ROI, and strategic positioning rather than discounting.",
+          "panelExample": "When they say 'too expensive': 'I understand investment is important. Let's look at the cost of not solving this problem vs. the value you'll gain...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 790,
+        "rating_average": 4.8,
+        "rating_count": 134,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "pricing",
+          "objection",
+          "value",
+          "negotiation",
+          "sales"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a202",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Goal Achievement Strategy",
+        "category": "coaching",
+        "ai_generated_icon": "🎖️",
+        "ai_generated_description": "Systematic approach to breaking down goals into actionable steps with accountability and motivation.",
+        "object_data": {
+          "templateName": "Goal Achievement Strategy",
+          "defaultRoleContext": "Coach",
+          "isPremiumByDefault": false,
+          "description": "Transforms ambitious goals into manageable action plans with built-in accountability and progress tracking.",
+          "panelExample": "Structure goals: 'Let's break this into 90-day milestones. What are 3 specific actions you can take this week to move toward [goal]?'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 678,
+        "rating_average": 4.7,
+        "rating_count": 112,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "goals",
+          "achievement",
+          "planning",
+          "accountability",
+          "motivation"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1f6",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Crisis Response",
+        "category": "emergency",
+        "ai_generated_icon": "🚨",
+        "ai_generated_description": "Immediate response framework for addressing urgent situations and minimizing negative impact with clear action steps.",
+        "object_data": {
+          "title": "Crisis Response",
+          "objective": "Address an urgent situation effectively and minimize negative impact",
+          "talking_points": [
+            {
+              "point": "Understand the exact nature of the crisis",
+              "desired_outcome": "Clear understanding of what happened and current status",
+              "notes": "Ask: What exactly happened? When? Who is affected? What's the current status?"
+            },
+            {
+              "point": "Immediate action plan",
+              "desired_outcome": "Agreement on next steps to contain the situation",
+              "notes": "Focus on stopping further damage before discussing long-term solutions"
+            },
+            {
+              "point": "Communication strategy",
+              "desired_outcome": "Decide who needs to be informed and how",
+              "notes": "Consider internal team, stakeholders, customers, and if applicable, media"
+            },
+            {
+              "point": "Follow-up and prevention",
+              "desired_outcome": "Plan for post-crisis review and preventive measures",
+              "notes": "Schedule a follow-up meeting to discuss what we learned and how to prevent recurrence"
+            }
+          ],
+          "participant_info": "Emergency meeting - participants likely stressed and need clear direction",
+          "category": "crisis",
+          "is_active": true
+        },
+        "install_count": 892,
+        "rating_average": 4.9,
+        "rating_count": 156,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "crisis",
+          "emergency",
+          "response",
+          "action-plan",
+          "communication"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a200",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Persuasive Communication",
+        "category": "business",
+        "ai_generated_icon": "🎯",
+        "ai_generated_description": "Elegant and influential communication techniques for building consensus and inspiring action.",
+        "object_data": {
+          "templateName": "Persuasive Communication",
+          "defaultRoleContext": "Cyrano",
+          "isPremiumByDefault": true,
+          "premiumUnlockMessage": "Unlock the art of eloquent persuasion with Cyrano's mastery.",
+          "description": "Combines logical arguments with emotional appeal and social proof for maximum influence.",
+          "panelExample": "Build compelling narrative: 'Imagine if we could [vision]. The evidence shows [data], and others like [social proof] have seen [results]...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 234,
+        "rating_average": 4.9,
+        "rating_count": 45,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "persuasion",
+          "influence",
+          "communication",
+          "rhetoric",
+          "eloquence"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1f8",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Customer Escalation",
+        "category": "business",
+        "ai_generated_icon": "📞",
+        "ai_generated_description": "Rapid customer issue resolution framework with containment and recovery procedures for service escalations.",
+        "object_data": {
+          "title": "Customer Escalation",
+          "objective": "Address an urgent customer issue and develop immediate resolution plan",
+          "talking_points": [
+            {
+              "point": "Customer situation overview",
+              "desired_outcome": "Clear understanding of the customer's issue and impact",
+              "notes": "Customer name, issue details, business impact, current status, point of contact"
+            },
+            {
+              "point": "Technical assessment",
+              "desired_outcome": "Understand root cause and potential solutions",
+              "notes": "What's causing the issue? What solutions are available? Timeline for resolution?"
+            },
+            {
+              "point": "Customer communication plan",
+              "desired_outcome": "Agree on what/how to communicate to the customer",
+              "notes": "What to say, who will communicate, frequency of updates"
+            },
+            {
+              "point": "Escalation plan if needed",
+              "desired_outcome": "Have a backup plan if initial resolution fails",
+              "notes": "Additional resources, alternative solutions, management escalation path"
+            }
+          ],
+          "participant_info": "Mix of customer success, technical teams, possibly leadership. Focus on quick, effective resolution.",
+          "category": "customer",
+          "is_active": true
+        },
+        "install_count": 445,
+        "rating_average": 4.6,
+        "rating_count": 67,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "customer",
+          "escalation",
+          "resolution",
+          "support",
+          "service"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1fd",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Performance Feedback",
+        "category": "business",
+        "ai_generated_icon": "📈",
+        "ai_generated_description": "Constructive performance feedback delivery with growth-focused language and actionable development plans.",
+        "object_data": {
+          "templateName": "Performance Feedback",
+          "defaultRoleContext": "Leader",
+          "isPremiumByDefault": false,
+          "description": "Balances recognition with development opportunities using specific examples and forward-looking goals.",
+          "panelExample": "Frame feedback as: 'I want to discuss how we can build on your strengths in [area] while developing skills in [growth area]...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 445,
+        "rating_average": 4.6,
+        "rating_count": 87,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "performance",
+          "feedback",
+          "management",
+          "development",
+          "leadership"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1ff",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Emotional Support",
+        "category": "personal",
+        "ai_generated_icon": "💝",
+        "ai_generated_description": "Compassionate responses for providing emotional support during difficult times with validation and comfort.",
+        "object_data": {
+          "templateName": "Emotional Support",
+          "defaultRoleContext": "Therapist",
+          "isPremiumByDefault": false,
+          "description": "Focuses on validation, active listening, and providing comfort without trying to 'fix' or minimize emotions.",
+          "panelExample": "Validate feelings: 'It sounds like you're going through something really difficult. Your feelings about this make complete sense...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 612,
+        "rating_average": 4.9,
+        "rating_count": 123,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "emotional-support",
+          "empathy",
+          "validation",
+          "comfort",
+          "listening"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a204",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Project Kickoff Meeting",
+        "category": "business",
+        "ai_generated_icon": "🚀",
+        "ai_generated_description": "Comprehensive project launch framework ensuring alignment on scope, timeline, roles, and success criteria.",
+        "object_data": {
+          "title": "Project Kickoff Meeting",
+          "objective": "Align all stakeholders on project scope, timeline, roles, and establish clear communication protocols",
+          "talking_points": [
+            {
+              "point": "Project overview and objectives",
+              "desired_outcome": "Shared understanding of project purpose and success criteria",
+              "notes": "Business case, project charter review, success metrics, stakeholder benefits"
+            },
+            {
+              "point": "Scope definition and deliverables",
+              "desired_outcome": "Clear agreement on what will be delivered",
+              "notes": "Detailed deliverables list, scope boundaries, what's excluded, change management process"
+            },
+            {
+              "point": "Timeline, milestones, and resource allocation",
+              "desired_outcome": "Realistic schedule with agreed milestones and resource commitments",
+              "notes": "Critical path, dependencies, resource availability, buffer time, risk contingencies"
+            },
+            {
+              "point": "Roles, responsibilities, and communication plan",
+              "desired_outcome": "Clear accountability and communication protocols",
+              "notes": "RACI matrix, decision-making authority, meeting cadence, reporting structure"
+            }
+          ],
+          "participant_info": "Project Manager, Stakeholders, Team Leads, Sponsor, Key Team Members",
+          "roleContext": "Leader"
+        },
+        "install_count": 723,
+        "rating_average": 4.8,
+        "rating_count": 134,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "project",
+          "kickoff",
+          "alignment",
+          "scope",
+          "timeline"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a201",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Adaptive Guidance",
+        "category": "coaching",
+        "ai_generated_icon": "🌊",
+        "ai_generated_description": "Context-aware guidance that adapts communication style and approach based on situational needs.",
+        "object_data": {
+          "templateName": "Adaptive Guidance",
+          "defaultRoleContext": "Ambient",
+          "isPremiumByDefault": true,
+          "premiumUnlockMessage": "Experience truly adaptive intelligence that evolves with your needs.",
+          "description": "Dynamically adjusts tone, approach, and suggestions based on emotional context and situational requirements.",
+          "panelExample": "Adapts approach: In tense situations provides calming guidance, in creative moments encourages exploration, in decisions offers structured analysis...",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 189,
+        "rating_average": 4.8,
+        "rating_count": 34,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "adaptive",
+          "contextual",
+          "intelligence",
+          "flexible",
+          "responsive"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1f7",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Urgent Decision Required",
+        "category": "business",
+        "ai_generated_icon": "⚡",
+        "ai_generated_description": "Fast-track decision making framework for time-sensitive choices with incomplete information.",
+        "object_data": {
+          "title": "Urgent Decision Required",
+          "objective": "Make a time-sensitive decision with available information",
+          "talking_points": [
+            {
+              "point": "Clarify the decision needed and deadline",
+              "desired_outcome": "Everyone understands what we're deciding and why it's urgent",
+              "notes": "Be specific about the exact decision needed and true deadline"
+            },
+            {
+              "point": "Review available information",
+              "desired_outcome": "Shared understanding of what we know and don't know",
+              "notes": "Focus on facts, identify critical information gaps"
+            },
+            {
+              "point": "Evaluate options quickly",
+              "desired_outcome": "Assess 2-3 options based on key criteria",
+              "notes": "Consider: time, cost, risk, alignment with goals, resource requirements"
+            },
+            {
+              "point": "Make decision and assign next steps",
+              "desired_outcome": "Clear decision with ownership for implementation",
+              "notes": "Document decision, rationale, owners, and immediate next steps"
+            }
+          ],
+          "participant_info": "Participants need to make quick decisions with incomplete information",
+          "category": "decision",
+          "is_active": true
+        },
+        "install_count": 634,
+        "rating_average": 4.7,
+        "rating_count": 89,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "decision",
+          "urgent",
+          "time-sensitive",
+          "evaluation",
+          "planning"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1fe",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Boundary Setting",
+        "category": "personal",
+        "ai_generated_icon": "🚧",
+        "ai_generated_description": "Assertive yet respectful techniques for establishing and maintaining personal and professional boundaries.",
+        "object_data": {
+          "templateName": "Boundary Setting",
+          "defaultRoleContext": "LegalGuardian",
+          "isPremiumByDefault": false,
+          "description": "Helps communicate limits clearly while maintaining relationships and professional respect.",
+          "panelExample": "Use clear language: 'I understand this is important to you. I'm not able to [action] because [reason]. What I can do is [alternative]...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 367,
+        "rating_average": 4.8,
+        "rating_count": 76,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "boundaries",
+          "assertiveness",
+          "communication",
+          "limits",
+          "respect"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a205",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Conflict Resolution Meeting",
+        "category": "personal",
+        "ai_generated_icon": "🕊️",
+        "ai_generated_description": "Structured mediation framework for resolving interpersonal conflicts with fairness and mutual understanding.",
+        "object_data": {
+          "title": "Conflict Resolution Meeting",
+          "objective": "Facilitate resolution of interpersonal conflict through structured dialogue and mutual understanding",
+          "talking_points": [
+            {
+              "point": "Ground rules and safe space establishment",
+              "desired_outcome": "Agreement on communication norms and respectful dialogue",
+              "notes": "No interrupting, use 'I' statements, focus on behavior not character, confidentiality"
+            },
+            {
+              "point": "Each party shares their perspective",
+              "desired_outcome": "Both sides feel heard and understood",
+              "notes": "Equal speaking time, active listening, emotion acknowledgment, no rebuttals during sharing"
+            },
+            {
+              "point": "Identify common ground and shared interests",
+              "desired_outcome": "Recognition of mutual goals and shared values",
+              "notes": "Find alignment points, shared objectives, common values, mutual respect"
+            },
+            {
+              "point": "Develop action plan and agreement",
+              "desired_outcome": "Concrete steps forward and behavior agreements",
+              "notes": "Specific actions, timeline, follow-up check-ins, success measures"
+            }
+          ],
+          "participant_info": "Conflicted parties, Neutral facilitator/manager, HR representative (if workplace conflict)",
+          "roleContext": "Counsellor"
+        },
+        "install_count": 334,
+        "rating_average": 4.6,
+        "rating_count": 67,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "conflict",
+          "resolution",
+          "mediation",
+          "dialogue",
+          "relationships"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a1fa",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Data Breach Response",
+        "category": "business",
+        "ai_generated_icon": "🔐",
+        "ai_generated_description": "Immediate cybersecurity incident response with containment, assessment, and legal compliance procedures.",
+        "object_data": {
+          "title": "Data Breach Response",
+          "objective": "Contain security breach, assess impact, and initiate recovery while maintaining legal compliance",
+          "talking_points": [
+            {
+              "point": "Breach containment and evidence preservation",
+              "desired_outcome": "Threat contained and forensic evidence secured",
+              "notes": "Isolate affected systems, preserve logs, document timeline, engage forensics team"
+            },
+            {
+              "point": "Impact assessment and data inventory",
+              "desired_outcome": "Clear understanding of what data was compromised",
+              "notes": "Types of data, number of records, sensitivity level, affected individuals/customers"
+            },
+            {
+              "point": "Legal and regulatory notification requirements",
+              "desired_outcome": "Compliance with notification laws and regulations",
+              "notes": "GDPR, state breach laws, industry regulations, notification timelines"
+            },
+            {
+              "point": "Communication and recovery planning",
+              "desired_outcome": "Stakeholder communication plan and system recovery roadmap",
+              "notes": "Customer notification, media response, system restoration, preventive measures"
+            }
+          ],
+          "participant_info": "CISO, Legal Counsel, IT Director, Communications Lead, Executive Leadership",
+          "category": "crisis",
+          "is_active": true
+        },
+        "install_count": 356,
+        "rating_average": 4.9,
+        "rating_count": 72,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "cybersecurity",
+          "data-breach",
+          "incident-response",
+          "legal",
+          "compliance"
+        ]
+      },
+      {
+        "id": "6886bc239714c797a4c1a203",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Performance Review Meeting",
+        "category": "business",
+        "ai_generated_icon": "📊",
+        "ai_generated_description": "Comprehensive performance evaluation framework with goal setting, feedback, and development planning.",
+        "object_data": {
+          "title": "Performance Review Meeting",
+          "objective": "Provide comprehensive performance feedback and establish development goals for the upcoming period",
+          "talking_points": [
+            {
+              "point": "Performance achievements and strengths review",
+              "desired_outcome": "Clear recognition of accomplishments and strengths",
+              "notes": "Review specific examples, quantify impact where possible, celebrate successes"
+            },
+            {
+              "point": "Growth areas and development opportunities",
+              "desired_outcome": "Identified areas for improvement with specific development plan",
+              "notes": "Focus on skill gaps, provide concrete examples, discuss learning resources"
+            },
+            {
+              "point": "Goal setting for next period",
+              "desired_outcome": "Clear, measurable goals aligned with company objectives",
+              "notes": "SMART goals, resource requirements, success metrics, timeline"
+            },
+            {
+              "point": "Career development and advancement discussion",
+              "desired_outcome": "Understood career path and advancement opportunities",
+              "notes": "Long-term career goals, skill requirements, promotion timeline, mentoring"
+            }
+          ],
+          "participant_info": "Direct Manager, Employee, HR Representative (optional), Department Head (for senior roles)",
+          "roleContext": "Leader"
+        },
+        "install_count": 456,
+        "rating_average": 4.5,
+        "rating_count": 78,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "performance",
+          "review",
+          "goals",
+          "development",
+          "career"
+        ]
+      },
+      {
+        "id": "6886ba90fb5a655f69de0cff",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Client Onboarding Session",
+        "category": "sales",
+        "ai_generated_icon": "🤝",
+        "ai_generated_description": "Comprehensive client onboarding meeting template to ensure smooth project kickoff and clear expectations.",
+        "object_data": {
+          "title": "Client Onboarding Session",
+          "objective": "Establish clear project scope, expectations, and communication protocols with new client",
+          "talking_points": [
+            {
+              "point": "Project scope and deliverables confirmation",
+              "desired_outcome": "Mutual agreement on exactly what will be delivered and when",
+              "notes": "Review SOW line by line. Address any scope questions or changes upfront."
+            },
+            {
+              "point": "Communication protocols and key contacts",
+              "desired_outcome": "Clear communication structure and contact information established",
+              "notes": "Define who communicates what, frequency of updates, preferred channels."
+            },
+            {
+              "point": "Timeline and milestone review",
+              "desired_outcome": "Agreed project timeline with key milestone dates",
+              "notes": "Identify any client dependencies or constraints that could affect timeline."
+            }
+          ],
+          "participant_info": "Account Manager, Project Manager, Client Stakeholders, Technical Lead (if applicable)",
+          "roleContext": "Partner"
+        },
+        "install_count": 198,
+        "rating_average": 4.8,
+        "rating_count": 54,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "client",
+          "onboarding",
+          "sales",
+          "project-kickoff",
+          "expectations"
+        ]
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d00",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Objection Handling",
+        "category": "sales",
+        "ai_generated_icon": "🛡️",
+        "ai_generated_description": "Advanced strategies for addressing client objections and concerns during sales conversations.",
+        "object_data": {
+          "templateName": "Objection Handling",
+          "defaultRoleContext": "Partner",
+          "isPremiumByDefault": false,
+          "description": "Provides strategic responses to common sales objections with empathy and data-driven approaches.",
+          "panelExample": "When client says 'It's too expensive', respond with: 'I understand cost is a key consideration. Let's break down the ROI you'll see in months 1-6...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 567,
+        "rating_average": 4.9,
+        "rating_count": 123,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "sales",
+          "objections",
+          "negotiation",
+          "communication",
+          "strategy"
+        ]
+      },
+      {
+        "id": "6886ba90fb5a655f69de0d01",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Conflict De-escalation",
+        "category": "personal",
+        "ai_generated_icon": "🕊️",
+        "ai_generated_description": "Evidence-based techniques for reducing tension and finding common ground in heated conversations.",
+        "object_data": {
+          "templateName": "Conflict De-escalation",
+          "defaultRoleContext": "Counsellor",
+          "isPremiumByDefault": false,
+          "description": "Provides calming language patterns and reframing techniques to reduce conflict and build understanding.",
+          "panelExample": "When tension rises, try: 'I can see this is really important to you. Help me understand your perspective better...'",
+          "enableSelfAuditFeedback": true
+        },
+        "install_count": 423,
+        "rating_average": 4.7,
+        "rating_count": 87,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "conflict",
+          "de-escalation",
+          "communication",
+          "relationships",
+          "emotional-intelligence"
+        ]
+      },
+      {
+        "id": "6886ba90fb5a655f69de0cfe",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Weekly Team Sync",
+        "category": "business",
+        "ai_generated_icon": "📊",
+        "ai_generated_description": "Structured weekly team meeting template for project updates, blockers, and goal setting.",
+        "object_data": {
+          "title": "Weekly Team Sync",
+          "objective": "Align team on progress, identify blockers, and set priorities for the upcoming week",
+          "talking_points": [
+            {
+              "point": "Project status updates from each team member",
+              "desired_outcome": "Clear understanding of current progress across all projects",
+              "notes": "Keep updates brief (2-3 minutes per person). Focus on completion percentage and key milestones."
+            },
+            {
+              "point": "Blockers and challenges discussion",
+              "desired_outcome": "Identify obstacles and assign ownership for resolution",
+              "notes": "Document blockers with specific actions and deadlines for resolution."
+            },
+            {
+              "point": "Priorities and goals for next week",
+              "desired_outcome": "Agreed priorities and clear individual commitments",
+              "notes": "Ensure priorities align with quarterly objectives and resource availability."
+            }
+          ],
+          "participant_info": "Team members, Project Manager, Department Head (optional)",
+          "roleContext": "Coach"
+        },
+        "install_count": 342,
+        "rating_average": 4.6,
+        "rating_count": 89,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "team",
+          "sync",
+          "weekly",
+          "business",
+          "project-management"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13c",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Legal Boundary Assertion",
+        "category": "legal",
+        "ai_generated_icon": "⚖️",
+        "ai_generated_description": "Professional guidance for establishing clear boundaries and protecting your legal interests in negotiations.",
+        "object_data": {
+          "templateName": "LegalBoundaryAssertion",
+          "defaultRoleContext": "LegalGuardian",
+          "isPremiumByDefault": true,
+          "description": "Legal-focused boundary setting with compliance considerations",
+          "panelExample": "I need to be clear about our position on this matter. Our policy requires [specific requirement] and we cannot proceed without that documentation.",
+          "premiumUnlockMessage": "Access legal-grade boundary setting techniques."
+        },
+        "install_count": 234,
+        "rating_average": 4.9,
+        "rating_count": 45,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "legal",
+          "boundaries",
+          "compliance",
+          "negotiation",
+          "premium"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13e",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "High-Ticket Sales Consultation",
+        "category": "sales",
+        "ai_generated_icon": "💎",
+        "ai_generated_description": "Premium sales framework for high-value consultative selling with discovery, value building, and closing techniques.",
+        "object_data": {
+          "title": "High-Ticket Sales Consultation",
+          "objective": "Conduct thorough discovery, build compelling value proposition, and close high-value opportunities",
+          "talking_points": [
+            {
+              "point": "Deep discovery of business challenges and pain points",
+              "desired_outcome": "Complete understanding of prospect's situation and impact",
+              "notes": "Current state assessment, cost of inaction, previous solutions tried, decision criteria"
+            },
+            {
+              "point": "Custom solution presentation with ROI justification",
+              "desired_outcome": "Clear value demonstration tied to specific business outcomes",
+              "notes": "ROI calculations, case studies, implementation timeline, success metrics"
+            },
+            {
+              "point": "Investment discussion and commitment securing",
+              "desired_outcome": "Agreement on terms and next steps with signed commitment",
+              "notes": "Payment options, implementation timeline, success guarantees, risk mitigation"
+            }
+          ],
+          "participant_info": "Decision Maker, Financial Approver, Implementation Lead, Technical Stakeholder",
+          "roleContext": "Cyrano"
+        },
+        "install_count": 178,
+        "rating_average": 4.9,
+        "rating_count": 23,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "high-ticket",
+          "sales",
+          "consultation",
+          "premium",
+          "closing"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c137",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Severe Weather Emergency Response Protocol",
+        "category": "emergency",
+        "ai_generated_icon": "🌪️",
+        "ai_generated_description": "Comprehensive severe weather response framework for coordinating safety measures, evacuations, and resource allocation during hurricanes, tornadoes, and floods.",
+        "object_data": {
+          "title": "Severe Weather Emergency Response Protocol",
+          "objective": "Coordinate immediate safety measures, communication protocols, and resource allocation during severe weather events",
+          "talking_points": [
+            {
+              "point": "Current weather threat assessment and timeline",
+              "desired_outcome": "Clear understanding of threat level, timing, and impact zones",
+              "notes": "NOAA weather radio frequencies, meteorologist consultation, local emergency management coordination"
+            },
+            {
+              "point": "Evacuation vs. shelter-in-place decision criteria",
+              "desired_outcome": "Clear go/no-go decision on evacuation with documented rationale",
+              "notes": "Consider building integrity, transportation safety, shelter capacity, special needs population"
+            },
+            {
+              "point": "Critical infrastructure protection priorities",
+              "desired_outcome": "Confirmed protection measures for essential systems",
+              "notes": "Emergency generator fuel levels, data center protection, medical equipment backup power"
+            }
+          ],
+          "participant_info": "Emergency Management Director, Facility Manager, Safety Officer, Communications Lead, Department Heads, Local Emergency Services Liaison",
+          "category": "crisis",
+          "is_active": true
+        },
+        "install_count": 246,
+        "rating_average": 4.8,
+        "rating_count": 67,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "weather",
+          "emergency",
+          "evacuation",
+          "safety",
+          "crisis-management"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13a",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Empathy Builder",
+        "category": "personal",
+        "ai_generated_icon": "💝",
+        "ai_generated_description": "Guidance for showing understanding and validating others' emotions in difficult conversations.",
+        "object_data": {
+          "templateName": "EmpathyBuilder",
+          "defaultRoleContext": "Therapist",
+          "isPremiumByDefault": false,
+          "description": "Helps users show understanding and validate others' emotions",
+          "panelExample": "I can see this is really important to you. Help me understand what specifically concerns you most about this situation."
+        },
+        "install_count": 893,
+        "rating_average": 4.6,
+        "rating_count": 203,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "empathy",
+          "emotional-intelligence",
+          "validation",
+          "therapy",
+          "communication"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13d",
+        "object_type": "meeting",
+        "visibility": "public",
+        "title": "Performance Review Framework",
+        "category": "business",
+        "ai_generated_icon": "📊",
+        "ai_generated_description": "Structured approach to employee performance reviews with goal setting and development planning.",
+        "object_data": {
+          "title": "Performance Review Framework",
+          "objective": "Conduct fair, comprehensive performance evaluation with clear feedback and development goals",
+          "talking_points": [
+            {
+              "point": "Achievement review against previous goals",
+              "desired_outcome": "Clear assessment of performance against established metrics",
+              "notes": "Quantitative results, project outcomes, peer feedback, customer impact"
+            },
+            {
+              "point": "Skills development and training needs assessment",
+              "desired_outcome": "Identified growth opportunities and learning plan",
+              "notes": "Technical skills gaps, leadership development, certification requirements"
+            },
+            {
+              "point": "Goal setting for upcoming performance period",
+              "desired_outcome": "SMART goals established with timeline and success metrics",
+              "notes": "Align with company objectives, stretch assignments, career progression steps"
+            }
+          ],
+          "participant_info": "Direct Manager, Employee, HR Representative (optional), Skip-level Manager (for senior roles)",
+          "roleContext": "Coach"
+        },
+        "install_count": 445,
+        "rating_average": 4.5,
+        "rating_count": 89,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "performance",
+          "review",
+          "HR",
+          "goals",
+          "development"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13b",
+        "object_type": "panel",
+        "visibility": "public",
+        "title": "Sales Objection Handler",
+        "category": "sales",
+        "ai_generated_icon": "💼",
+        "ai_generated_description": "Expert techniques for addressing customer concerns and converting objections into opportunities.",
+        "object_data": {
+          "templateName": "SalesObjectionHandler",
+          "defaultRoleContext": "Coach",
+          "isPremiumByDefault": true,
+          "description": "Advanced techniques for handling sales objections and closing deals",
+          "panelExample": "I hear that price is a concern. Let's talk about the value this brings to your specific situation and explore options that work within your budget.",
+          "premiumUnlockMessage": "Unlock professional sales techniques used by top performers."
+        },
+        "install_count": 567,
+        "rating_average": 4.8,
+        "rating_count": 128,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "sales",
+          "objections",
+          "closing",
+          "negotiation",
+          "premium"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c139",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Cybersecurity Incident Response Protocol",
+        "category": "business",
+        "ai_generated_icon": "🔒",
+        "ai_generated_description": "Rapid response framework for data breaches, cyberattacks, and IT security incidents with containment and recovery procedures.",
+        "object_data": {
+          "title": "Cybersecurity Incident Response Protocol",
+          "objective": "Contain security breaches, assess damage, and restore systems while maintaining compliance and communication protocols",
+          "talking_points": [
+            {
+              "point": "Incident scope and attack vector identification",
+              "desired_outcome": "Clear understanding of breach extent and entry points",
+              "notes": "Network logs, affected systems, compromised accounts, timeline reconstruction"
+            },
+            {
+              "point": "Immediate containment and isolation measures",
+              "desired_outcome": "Threat contained and prevented from spreading",
+              "notes": "Network segmentation, account lockdowns, system isolation, evidence preservation"
+            }
+          ],
+          "participant_info": "CISO, IT Director, Legal Counsel, Communications Lead, CEO, External Security Consultants",
+          "category": "technical",
+          "is_active": true
+        },
+        "install_count": 156,
+        "rating_average": 4.9,
+        "rating_count": 34,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "cybersecurity",
+          "breach",
+          "incident-response",
+          "IT",
+          "compliance"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c138",
+        "object_type": "emergency",
+        "visibility": "public",
+        "title": "Pandemic Response Management Framework",
+        "category": "medical",
+        "ai_generated_icon": "🦠",
+        "ai_generated_description": "Complete pandemic response protocol covering containment, workforce protection, and business continuity during health emergencies.",
+        "object_data": {
+          "title": "Pandemic Response Management Framework",
+          "objective": "Establish containment protocols, maintain essential operations, and protect workforce health during pandemic conditions",
+          "talking_points": [
+            {
+              "point": "Current infection rates and transmission assessment",
+              "desired_outcome": "Clear understanding of outbreak scope and risk levels",
+              "notes": "CDC guidance updates, local health department data, contact tracing results"
+            },
+            {
+              "point": "Workforce exposure assessment and contact tracing",
+              "desired_outcome": "Defined exposure response protocols with clear isolation procedures",
+              "notes": "Employee health screening, contact mapping, quarantine requirements"
+            }
+          ],
+          "participant_info": "Chief Medical Officer, HR Director, Operations Manager, IT Director, Supply Chain Manager, Legal Counsel",
+          "category": "crisis",
+          "is_active": true
+        },
+        "install_count": 189,
+        "rating_average": 4.7,
+        "rating_count": 43,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": false,
+        "tags": [
+          "pandemic",
+          "health",
+          "containment",
+          "workforce",
+          "medical"
+        ]
+      },
+      {
+        "id": "6886a93b912e6c61ccb2c13f",
+        "object_type": "meeting",
+        "visibility": "priority",
+        "title": "Family Emergency Coordination Protocol",
+        "category": "emergency",
+        "ai_generated_icon": "👨‍👩‍👧‍👦",
+        "ai_generated_description": "Secure family emergency coordination with evacuation plans, communication protocols, and safety procedures.",
+        "install_count": 12,
+        "rating_average": 5,
+        "rating_count": 3,
+        "report_count": 0,
+        "is_disabled": false,
+        "contains_sensitive_info": true,
+        "tags": [
+          "family",
+          "emergency",
+          "priority",
+          "secure",
+          "coordination"
+        ]
+      }
+    ],
+    "UserObjectInstall": [
+      {
+        "id": "6a0328ebf2a2ae4dd722e7c3",
+        "marketplace_object_id": "6886a93b912e6c61ccb2c13a",
+        "object_type": "panel",
+        "install_type": "public_get",
+        "priority_level": "normal",
+        "is_priority": false,
+        "auto_update": true
+      },
+      {
+        "id": "6998c4b2847a13a6e719af7a",
+        "marketplace_object_id": "6886bc239714c797a4c1a1fb",
+        "object_type": "panel",
+        "install_type": "public_get",
+        "priority_level": "normal",
+        "is_priority": false,
+        "auto_update": true
+      },
+      {
+        "id": "68876a164a5bb3ae9cb150ac",
+        "marketplace_object_id": "6886a93b912e6c61ccb2c137",
+        "object_type": "emergency",
+        "install_type": "public_get",
+        "priority_level": "normal",
+        "is_priority": false,
+        "auto_update": true
+      }
+    ],
+    "ObjectReport": [],
+    "ObjectRating": []
+  }
+}

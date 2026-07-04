@@ -1,0 +1,98 @@
+{
+  "exochainRepository": "github.com/exochain/exochain",
+  "localEvidencePath": "/Users/bobstewart/dev/exochain",
+  "runtimeAdapterStatus": "verified",
+  "primitiveCategories": [
+    {
+      "id": "core",
+      "name": "Foundational deterministic types and cryptography",
+      "evidencePath": "crates/exo-core",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "identity",
+      "name": "DID management and identity verification",
+      "evidencePath": "crates/exo-identity",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "consent",
+      "name": "Bailment consent engine",
+      "evidencePath": "crates/exo-consent",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "authority",
+      "name": "Authority delegation and permission chains",
+      "evidencePath": "crates/exo-authority",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "gatekeeper",
+      "name": "Constitutional kernel and invariant enforcement",
+      "evidencePath": "crates/exo-gatekeeper",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "dag",
+      "name": "Immutable causal ledger",
+      "evidencePath": "crates/exo-dag",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "proofs",
+      "name": "Cryptographic proof generation and verification",
+      "evidencePath": "crates/exo-proofs",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "api",
+      "name": "External API surface",
+      "evidencePath": "crates/exo-api",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "gateway",
+      "name": "Gateway routing and health probes",
+      "evidencePath": "crates/exo-gateway",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "messaging",
+      "name": "Encrypted messaging envelopes and trigger checks",
+      "evidencePath": "crates/exo-messaging",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "avc",
+      "name": "Autonomous Volition Credentials",
+      "evidencePath": "crates/exo-avc",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "economy",
+      "name": "Custody-native receipts and settlement records",
+      "evidencePath": "crates/exo-economy",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "rust-sdk",
+      "name": "Rust SDK facade",
+      "evidencePath": "crates/exochain-sdk",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "typescript-sdk",
+      "name": "TypeScript SDK package",
+      "evidencePath": "packages/exochain-sdk",
+      "adapterStatus": "evidence-only"
+    },
+    {
+      "id": "wasm",
+      "name": "WASM bridge",
+      "evidencePath": "packages/exochain-wasm",
+      "adapterStatus": "evidence-only"
+    }
+  ]
+}
+

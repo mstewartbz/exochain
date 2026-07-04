@@ -39,6 +39,23 @@ The Apache-2.0 license applies to:
 - CI/CD configurations in `.github/`
 - The WASM compilation target (`exochain-wasm`)
 
+### 2a. Proprietary Carve-Out — `livesafe/`
+
+The [`livesafe/`](../../livesafe/) subtree is the **exception**. LiveSafe is a
+proprietary, commercial application owned by the Exochain Foundation and is
+**not** licensed under Apache-2.0. Its terms are stated in
+[`livesafe/LICENSE`](../../livesafe/LICENSE) (all rights reserved). Its presence
+in this public repository is for transparency and reference only and grants no
+right to use, copy, modify, or distribute it.
+
+Because of this carve-out:
+- `livesafe/` carries its own `LICENSE` and its nested Rust manifest declares
+  `license = "UNLICENSED"` with `publish = false`.
+- `livesafe/` is deliberately excluded from the Cargo workspace
+  (`exclude = ["livesafe"]` in the root `Cargo.toml`) so the Apache-only
+  `cargo-deny` dependency-license screen never treats the proprietary code as a
+  workspace member.
+
 ## 3. Rationale
 
 Apache-2.0 was chosen because:

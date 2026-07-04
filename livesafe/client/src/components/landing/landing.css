@@ -1,0 +1,151 @@
+/*
+ * Copyright 2026 Exochain Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * LiveSafe landing motion system — single source of truth.
+ * - Only opacity / transform / stroke-dashoffset animate.
+ * - Animations run only inside `.ls-anim.play` (gated by useInView).
+ * - Final-frame doctrine: resting CSS IS the final frame; keyframes start
+ *   from hidden/offset `from` states with `animation-fill-mode: both`.
+ * - `.ls-motion-only` elements exist only for motion; the animation makes
+ *   them visible. Under reduced motion they stay hidden.
+ */
+
+:root {
+  --ls-grad: linear-gradient(90deg, #a78bfa 0%, #818cf8 30%, #60a5fa 65%, #22d3ee 100%);
+}
+
+/* Signature-gradient text helper (budget: 4 uses page-wide). */
+.ls-grad-text {
+  background-image: var(--ls-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Play gating: everything inside a `.ls-anim` figure is paused until
+   the shared useInView hook adds `.play`. Loops are infinite, so a late
+   start is harmless. */
+.ls-anim,
+.ls-anim * {
+  animation-play-state: paused;
+}
+.ls-anim.play,
+.ls-anim.play * {
+  animation-play-state: running;
+}
+
+/* Elements that exist only for motion — hidden at rest; their animation
+   (with fill-mode: both) makes them visible. */
+.ls-motion-only {
+  opacity: 0;
+}
+
+/* Perf: let the browser skip offscreen explainer sections. */
+.ls-cv {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 640px;
+}
+
+/* ── Keyframe registry ──────────────────────────────────────────────── */
+
+@keyframes ls-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ls-slide-in {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes ls-pop {
+  from { opacity: 0; transform: scale(0.6); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Elements set their own stroke-dasharray and --ls-dash. */
+@keyframes ls-draw {
+  from { stroke-dashoffset: var(--ls-dash, 1000); }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes ls-undraw {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: var(--ls-dash, 1000); }
+}
+
+/* Scan-beam vertical sweep loop. */
+@keyframes ls-sweep {
+  0%   { opacity: 0; transform: translateY(0); }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(var(--ls-sweep-dist, 48px)); }
+}
+
+/* Ring countdown — linear; element sets --ls-deplete-to (and dasharray). */
+@keyframes ls-deplete {
+  from { stroke-dashoffset: var(--ls-deplete-from, 0); }
+  to   { stroke-dashoffset: var(--ls-deplete-to, 251); }
+}
+
+/* Checkmark stroke draw (≈250ms usage). */
+@keyframes ls-check {
+  from { stroke-dashoffset: var(--ls-dash, 48); }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes ls-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+
+@keyframes ls-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+
+/* Opacity cross-fade for label / counter swaps. */
+@keyframes ls-fade-swap {
+  0%   { opacity: 0; }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* PACE tile glow pulse — 8s loop, ~800ms pulse; stagger via --i.
+   Opacity-only: a blue border overlay (.ls-tile-pulse) fades in/out above
+   the static white/20 dashed border, so no paint-triggering border-color
+   animation. Gated under .ls-anim.play like every other loop. */
+@keyframes ls-tile-glow {
+  0%, 10%, 100% { opacity: 0; }
+  5%            { opacity: 1; }
+}
+
+.ls-tile-pulse {
+  opacity: 0;
+}
+.ls-anim.play .ls-tile-pulse {
+  animation: ls-tile-glow 8s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 1s);
+}
+
+/* ── Reduced motion: one block, zero extra work ─────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .ls-anim, .ls-anim * { animation: none !important; transition: none !important; }
+}
