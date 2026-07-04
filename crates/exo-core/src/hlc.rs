@@ -599,4 +599,63 @@ mod tests {
             "HLC wall-clock failures must propagate instead of silently using epoch zero"
         );
     }
+
+    // -----------------------------------------------------------------
+    // VCG-012 RED — partition-recovery peer-set reconciliation (D6).
+    //
+    // D6 (ratified 2026-07-02): partition recovery converges to the
+    // quorum-MEDIAN of peers' latest known timestamps, never accept-max.
+    // One bad/drifted clock must not steer history ordering. No such
+    // reconciliation policy exists yet on `HybridClock` — this is expected
+    // compile-red until the D6 peer-set reconciliation API lands.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn partition_recovery_converges_to_quorum_median_not_accept_max() {
+        // Five peers' last-known timestamps before reconnect. Constructed so
+        // the median (100_500) is neither the max (999_999) nor the min
+        // (100_000) — this proves the reconciliation is genuinely
+        // median-based and not a disguised accept-max.
+        let peer_timestamps = vec![
+            Timestamp::new(100_000, 0),
+            Timestamp::new(100_200, 0),
+            Timestamp::new(100_500, 0),
+            Timestamp::new(100_800, 0),
+            Timestamp::new(999_999, 0), // one wildly drifted / malicious peer
+        ];
+
+        let reconciled = HybridClock::reconcile_partition_recovery(&peer_timestamps)
+            .expect("quorum-median reconciliation must succeed with an odd-sized peer set");
+
+        assert_eq!(
+            reconciled,
+            Timestamp::new(100_500, 0),
+            "partition recovery must converge to the quorum MEDIAN, not the max"
+        );
+        assert_ne!(
+            reconciled,
+            Timestamp::new(999_999, 0),
+            "silent accept-max is forbidden by D6: one bad clock must not steer history ordering"
+        );
+    }
+
+    #[test]
+    fn partition_recovery_flags_anomaly_when_a_peer_is_a_wide_outlier() {
+        let peer_timestamps = vec![
+            Timestamp::new(100_000, 0),
+            Timestamp::new(100_100, 0),
+            Timestamp::new(100_200, 0),
+            Timestamp::new(100_300, 0),
+            Timestamp::new(999_999, 0), // wide outlier vs. the quorum
+        ];
+
+        let outcome = HybridClock::reconcile_partition_recovery_with_anomaly_report(&peer_timestamps)
+            .expect("reconciliation with anomaly reporting must succeed");
+
+        assert_eq!(outcome.median, Timestamp::new(100_200, 0));
+        assert!(
+            !outcome.anomalous_peers.is_empty(),
+            "a wide-outlier peer must be flagged, not silently folded into the median"
+        );
+    }
 }
