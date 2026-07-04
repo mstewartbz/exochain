@@ -20,6 +20,9 @@
 //! domain-tagged CBOR payloads so the same logical authorization challenge has
 //! one deterministic byte representation.
 
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use std::collections::BTreeMap;
+
 use exo_core::types::{Did, Hash256, PublicKey, Signature};
 use serde::Serialize;
 
@@ -28,6 +31,14 @@ pub(crate) const BOOTSTRAP_SIGNING_DOMAIN: &str = "exo.zerodentity.session_boots
 pub(crate) const CLAIM_SUBMISSION_SIGNING_DOMAIN: &str = "exo.zerodentity.claim_submission.v1";
 pub(crate) const REQUEST_SIGNING_DOMAIN: &str = "exo.zerodentity.session_request.v1";
 pub(crate) const SESSION_TOKEN_DOMAIN: &str = "exo.zerodentity.session_token.v1";
+/// Domain-separation tag for the device/behavioral sample proof-of-
+/// possession payload (VCG-009). Distinct from
+/// [`CLAIM_SUBMISSION_SIGNING_DOMAIN`] because this payload binds different
+/// content (sample bytes, not claim routing metadata) — a signature
+/// produced for one must never verify against the other.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+pub(crate) const DEVICE_BEHAVIORAL_SUBMISSION_SIGNING_DOMAIN: &str =
+    "exo.zerodentity.device_behavioral_submission.v1";
 
 #[derive(Serialize)]
 struct BootstrapSigningPayload<'a> {
@@ -46,6 +57,29 @@ struct ClaimSubmissionSigningPayload<'a> {
     provider: Option<&'a str>,
     verification_channel: Option<&'a str>,
     created_ms: u64,
+    public_key: &'a PublicKey,
+}
+
+/// Sample-bound proof-of-possession payload for device/behavioral ingestion
+/// (VCG-009). Binds `subject_did`, all three sample fields
+/// (`device_fingerprint`, `behavioral_hash`, `signal_hashes`), and the
+/// signer's own `public_key` — so a signature only verifies for exactly
+/// these sample bytes under exactly this DID. `claim_type`/`created_ms`/
+/// `provider`/`consent_receipt_id` are deliberately NOT bound: they are
+/// routing metadata or a capability reference checked separately by the
+/// consent gate, not sample content.
+///
+/// `signal_hashes` is a `BTreeMap` so key iteration order is deterministic
+/// (required for a canonical, reproducible signing payload) without any
+/// extra sorting step.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+#[derive(Serialize)]
+struct DeviceBehavioralSubmissionSigningPayload<'a> {
+    domain: &'static str,
+    subject_did: &'a str,
+    device_fingerprint: Option<&'a str>,
+    behavioral_hash: Option<&'a str>,
+    signal_hashes: &'a BTreeMap<String, String>,
     public_key: &'a PublicKey,
 }
 
@@ -105,6 +139,29 @@ pub(crate) fn claim_submission_signing_payload(
         provider,
         verification_channel,
         created_ms,
+        public_key,
+    })
+}
+
+/// Builds the canonical, domain-separated CBOR bytes that a device/
+/// behavioral sample submission (VCG-009) must be signed over. Every sample
+/// field is bound so that swapping any one of them invalidates the
+/// signature — see [`DeviceBehavioralSubmissionSigningPayload`] for the
+/// binding rationale.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+pub(crate) fn device_behavioral_submission_signing_payload(
+    subject_did: &Did,
+    device_fingerprint: Option<&str>,
+    behavioral_hash: Option<&str>,
+    signal_hashes: &BTreeMap<String, String>,
+    public_key: &PublicKey,
+) -> Result<Vec<u8>, String> {
+    encode_cbor(&DeviceBehavioralSubmissionSigningPayload {
+        domain: DEVICE_BEHAVIORAL_SUBMISSION_SIGNING_DOMAIN,
+        subject_did: subject_did.as_str(),
+        device_fingerprint,
+        behavioral_hash,
+        signal_hashes,
         public_key,
     })
 }

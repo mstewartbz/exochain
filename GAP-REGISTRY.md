@@ -149,13 +149,13 @@ Amendment baseline (2026-07-02, local run on clean `origin/main` at `2d4baec1`):
 | VCG-006 | P1 | Green-local | Core runtime adapter | AVC runtime | Civilizational-class AVC closure | issues `#734`-`#737` regression tests | node/gateway AVC tests plus runtime probes |
 | VCG-007 | P1 | Green-local | Adjacent adapter | CrossChecked boundary | Verified CrossChecked provenance | external receipt authority proof tests | `cargo test -p exochain-node crosschecked` |
 | VCG-008 | P1 | Green-local | Core runtime adapter | 0dentity | Public first-touch claims | proof-of-possession negative tests | `cargo test -p exochain-node zerodentity` |
-| VCG-009 | P1 | Open | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
+| VCG-009 | P1 | Green-local | Core runtime adapter | 0dentity | Device/behavior trust inputs | consented sample ingestion tests | `cargo test -p exochain-node zerodentity` |
 | VCG-010 | P1 | Green-local | Core runtime adapter | Holon runtime | Holons as trusted actors | signed authority/provenance tests | `cargo test -p exochain-node holon` |
 | VCG-011 | P1 | Open | EXOCHAIN core | TEE integration | Hardware TEE attestation | platform quote verifier tests | `cargo test -p exochain-gatekeeper tee` |
 | VCG-012 | P2 | Green-local | EXOCHAIN core | Distributed time | Multi-node causal finality | multi-node HLC partition tests | `cargo test -p exochain-core hlc` |
 | VCG-013 | P2 | Green-local | EXOCHAIN core | Tenant platform | SaaS tenant ops and billing | tenant metering and billing export tests | `cargo test -p exochain-tenant` |
 | VCG-014 | P2 | Green-local | Governance/legal | Council/legal | Constitutional completeness | unresolved Sybil/no-admin traceability guard | governance guard plus legal sign-off record |
-| VCG-015 | P1 | Open | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
+| VCG-015 | P1 | Green-local | Core runtime adapter | Governance runtime | New validators can cast verifiable votes | validator public-key registration tests | `cargo test -p exochain-node governance` |
 
 ## VCG-001 - Production ZK Proof Backend Absent
 
@@ -989,9 +989,52 @@ cargo clippy -p exochain-node --all-targets -- -D warnings
 ## VCG-009 - 0dentity Device and Behavioral Axes Are Unwired
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** 0dentity
+
+Lane record (2026-07-04, branch `vcg/009-zerodentity-axes`, green + one corrective):
+
+- Scout confirmed the gap was wider than the row stated: no production ingestion
+  producer (`put_fingerprint`/`put_behavioral` had zero HTTP call sites), the
+  submit DTO lacked the spec §7.1 sample fields, and `exo-consent` was declared
+  but unreferenced. Consent scoping was new integration, not plumbing.
+- Green (behind `unaudited-zerodentity-device-behavioral-axes`): added
+  `device_fingerprint`/`behavioral_hash`/`signal_hashes` to the submit path;
+  wired REAL `exo-consent` (`ConsentGate`, default-deny Bailment) gating
+  persistence; bounded ingestion (`MAX_SIGNAL_HASHES` = FingerprintSignal
+  variant count); content-hash replay dedup; store-backed scoring so the score
+  reflects PERSISTED samples. `exo-consent` removed from the machete ignore list
+  (genuinely used).
+- First green was REFUTED (adversary + coordinator): the handler checked the
+  signature was merely non-empty and never called `crypto::verify`. Because a
+  DID and public key are both spec-Public, an attacker knowing a victim's public
+  DID+key could POST samples into the victim's store with a garbage signature
+  whenever the victim held any active session — a cross-account injection
+  contradicting the spec's own proof-of-possession claim.
+- Corrective (strengthen-RED → GREEN → re-REFUTE): added
+  `session_auth::device_behavioral_submission_signing_payload` — a canonical
+  CBOR payload with a distinct domain tag
+  (`exo.zerodentity.device_behavioral_submission.v1`) binding subject_did,
+  device_fingerprint, behavioral_hash, the full signal_hashes map, AND the
+  public_key. `handle_device_behavioral_ingestion` now
+  `crypto::verify(&payload, &signature, &public_key)` and returns 401 on
+  failure BEFORE the consent gate and BEFORE the single persistence path
+  (onboarding.rs order: verify → consent → put_fingerprint/put_behavioral).
+- Re-refutation NOT-REFUTED (workflow adversary + independent coordinator
+  verification): garbage signature, cross-account (attacker key over victim
+  DID — public_key is bound and verified against the signing key),
+  sample-substitution, and domain-tag replay are all rejected 401 with nothing
+  persisted; oversized payload 400; consent bypass 403 (default-deny + active
+  session + Granted). The self-consent model is correct here — the user
+  cryptographically authorizes enrollment of their OWN device; cross-account is
+  closed by proof-of-possession. Single production write path, docs updated to
+  match.
+- Gates: `exochain-node` zerodentity 311 (default) / 324 (axes-on) pass; full
+  crate 1320 pass; clippy `-D warnings` clean across all 4 feature combos;
+  nightly fmt clean; cargo machete clean.
+- Status Green-local: consent-scoped, proof-of-possession-verified
+  device/behavioral ingestion with store-backed scoring. Closed after merge + CI.
 
 Evidence:
 
@@ -1435,9 +1478,59 @@ cargo clippy -p exochain-governance --all-targets -- -D warnings
 ## VCG-015 - Added Validators Have No Registered Public Key
 
 **Priority:** P1
-**Status:** Open
+**Status:** Green-local
 **Classification:** Core runtime adapter
 **Owner role:** Governance runtime
+
+Lane record (2026-07-04, branch `vcg/015-validator-key-registration`):
+
+- Scout/discovery: VCG-005's apply path inserted a cryptographically-inert
+  placeholder key for governance-added validators (AddValidator carried only a
+  DID; a DID is a one-way BLAKE3 hash of the key). A governance-added validator
+  therefore could not cast a verifiable vote — a liveness gap.
+- Green: `ValidatorChange::AddValidator` now carries the validator's real
+  Ed25519 `public_key` on the wire (`wire.rs`; RemoveValidator unchanged —
+  pre-1.0 CBOR format change). `validate_governance_proposal_payload` is
+  FAIL-CLOSED: it derives `did_from_public_key(public_key)` and rejects the
+  change outright unless it equals the claimed DID — never substitutes a
+  placeholder. This runs at all three gates (remote-proposal validation, local
+  submit, and the authoritative committed-apply gate
+  `apply_committed_validator_change_in_memory`, via `.ok()?` before any state
+  mutation). `apply` registers the SUPPLIED validated key;
+  `placeholder_validator_public_key` was deleted (zero production refs).
+- Emit sites updated: `api.rs` "add" action requires + cross-checks a real key
+  (rejects add requests lacking a valid key). The VCG-005 shared test fixture
+  switched from a hardcoded DID literal to a real-keypair-derived DID (now
+  required by the cross-check).
+- Cross-lane reconciliation with VCG-010 (D5, `holons.rs` Scaling-Holon,
+  default-off `unaudited-infrastructure-holons`): VCG-010 (merged first) made
+  auto-promotion RECOMMENDATION-ONLY — it broadcasts a `RecommendationOnly`
+  governance event as named evidence and NEVER submits a `ValidatorSetChange`
+  proposal. VCG-015 requires `AddValidator` to carry a real key. The coordinator
+  reconciliation keeps VCG-010's recommendation-only broadcast (D5 intact:
+  zero `ValidatorSetChange` proposals; the D5 test's `observed_governance_events
+  > 0` premise preserved) and adapts the evidence `AddValidator` to the 2-field
+  variant with an explicit all-zero ADVISORY SENTINEL key, heavily documented:
+  it is never applied, and because it does not hash to the candidate DID,
+  VCG-015's apply-path cross-check would reject it fail-closed if anyone
+  submitted the recommendation payload verbatim as a real proposal. A genuine
+  key-bearing recommendation awaits the PeerRegistry->consensus-key follow-on.
+  Both lanes' governing tests pass together (holon 28/0; validator/governance/
+  reactor 111/0).
+- Adversarial re-refutation (NOT-REFUTED, workflow REFUTE + independent
+  coordinator verification): no path admits a key that does not hash to its
+  DID; no placeholder residue; every AddValidator construction site supplies a
+  real key (2-field variant makes a missed site a hard compile error);
+  missing/malformed keys fail CBOR decode before the cross-check; VCG-005
+  RemoveValidator/BFT-floor untouched; the new validator's genuine Ed25519
+  signature is accepted end-to-end (`crypto::verify` + `consensus::vote_verified`).
+- Gates: `exochain-node` governance 48 / reactor 55 / validator 27 pass; full
+  crate 1320 pass; clippy `-D warnings` clean (incl. feature-gated); nightly
+  fmt clean.
+- Residual (follow-on lane, out of scope): real Scaling-Holon auto-promotion
+  needs a PeerRegistry->consensus-key lookup that does not exist yet.
+- Status Green-local: governance-added validators now register a verifiable
+  key, fail-closed. Closed after merge + CI.
 
 Discovered by the VCG-005 lane (2026-07-03) and recorded here per the Single
 Source Rule before remediation.

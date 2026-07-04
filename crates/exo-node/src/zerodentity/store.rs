@@ -28,6 +28,10 @@
 //!
 //! Spec reference: §9, §12.1.
 
+// VCG-009: OnceLock is only used by the device/behavioral ingestion-service
+// keypair helper, which is gated behind the axes feature.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -36,6 +40,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+// `ConsentGate` types the always-present `device_behavioral_consent_gate`
+// store field (kept ungated so the struct keeps deriving `Default`); the rest
+// of the consent machinery is compiled only under the axes feature.
+use exo_consent::gatekeeper::ConsentGate;
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use exo_consent::{
+    ConsentDecision, ConsentPolicy, ConsentRequirement,
+    bailment::{self, BailmentType},
+};
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+use exo_core::crypto::KeyPair;
 use exo_core::types::{Did, Hash256, ReceiptOutcome, Signature, Timestamp, TrustReceipt};
 use exo_dag::dag::{DagNode, compute_node_hash};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -57,6 +72,72 @@ pub const ZERODENTITY_ERASURE_MAX_FUTURE_SKEW_MS: u64 = 500;
 /// Startup warning emitted if a caller chooses the test/dev in-memory store.
 pub const ZERODENTITY_STORE_PERSISTENCE_WARNING: &str =
     "0dentity production startup requires DAG DB-backed persistence";
+
+// ---------------------------------------------------------------------------
+// Device/behavioral consent scoping (VCG-009)
+// ---------------------------------------------------------------------------
+
+/// `exo_consent` action type gating persistence of client-collected device
+/// fingerprint and behavioral biometric samples. Only registered under
+/// `unaudited-zerodentity-device-behavioral-axes`; the feature-off path never
+/// consults consent because it never reaches the ingestion branch at all.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+pub const DEVICE_BEHAVIORAL_CONSENT_ACTION: &str = "zerodentity.device_behavioral_ingest";
+/// Consent policy role required of the subject granting device/behavioral
+/// ingestion consent over their own claim.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+const DEVICE_BEHAVIORAL_CONSENT_ROLE: &str = "subject";
+/// Minimum clearance level for the device/behavioral ingestion consent grant.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+const DEVICE_BEHAVIORAL_CONSENT_CLEARANCE: u32 = 1;
+/// Fixed DID for the in-process 0dentity device/behavioral ingestion service.
+/// This is the bailee in every self-consent bailment a subject grants over
+/// their own device/behavioral samples: the subject (bailor) entrusts THIS
+/// service with processing rights over evidence it is about to persist.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+const DEVICE_BEHAVIORAL_INGESTION_SERVICE_DID: &str =
+    "did:exo:zerodentity-device-behavioral-ingestion-service";
+/// Deterministic seed for the ingestion service's Ed25519 keypair. The
+/// service signs its own bailment acceptance (it is the bailee); there is no
+/// secret-material exposure here because this key only ever authorizes the
+/// service to receive consent grants, never to act on a subject's behalf.
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+const DEVICE_BEHAVIORAL_INGESTION_SERVICE_KEY_SEED: [u8; 32] = [0x0d; 32];
+
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+fn device_behavioral_ingestion_service_keypair() -> anyhow::Result<&'static KeyPair> {
+    static KEYPAIR: OnceLock<anyhow::Result<KeyPair>> = OnceLock::new();
+    KEYPAIR
+        .get_or_init(|| {
+            KeyPair::from_secret_bytes(DEVICE_BEHAVIORAL_INGESTION_SERVICE_KEY_SEED).map_err(
+                |error| {
+                    anyhow::anyhow!("0dentity ingestion service keypair seed rejected: {error}")
+                },
+            )
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+fn device_behavioral_ingestion_service_did() -> anyhow::Result<Did> {
+    Did::new(DEVICE_BEHAVIORAL_INGESTION_SERVICE_DID)
+        .map_err(|error| anyhow::anyhow!("0dentity ingestion service DID malformed: {error}"))
+}
+
+#[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+fn device_behavioral_consent_policy() -> ConsentPolicy {
+    ConsentPolicy {
+        id: "zerodentity-device-behavioral-v1".into(),
+        name: "0dentity device/behavioral ingestion consent".into(),
+        deny_by_default: true,
+        required_consents: vec![ConsentRequirement {
+            action_type: DEVICE_BEHAVIORAL_CONSENT_ACTION.into(),
+            required_role: DEVICE_BEHAVIORAL_CONSENT_ROLE.into(),
+            min_clearance_level: DEVICE_BEHAVIORAL_CONSENT_CLEARANCE,
+        }],
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 enum ZerodentityStoreBackend {
@@ -562,6 +643,16 @@ pub struct ZerodentityStore {
     backend: ZerodentityStoreBackend,
     /// Node identity signer used to emit verifiable trust receipts.
     receipt_signing: Option<ReceiptSigningContext>,
+    /// Consent gate for device/behavioral sample ingestion (VCG-009).
+    /// Lazily constructed on first use so `ZerodentityStore` can keep
+    /// deriving `Default`; see `consent_gate_mut`.
+    #[allow(dead_code)]
+    device_behavioral_consent_gate: Option<ConsentGate>,
+    /// Bailment ids already registered per `(subject_did, receipt_id)` so a
+    /// replayed submit does not re-propose/re-accept a fresh bailment for an
+    /// already-granted receipt.
+    #[allow(dead_code)]
+    device_behavioral_consent_receipts: BTreeSet<(String, String)>,
     #[cfg(test)]
     fail_claim_reads: bool,
     #[cfg(test)]
@@ -1062,6 +1153,136 @@ impl ZerodentityStore {
             .entry(did.as_str().to_owned())
             .or_default()
             .push(sample);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Consent — device/behavioral ingestion (VCG-009)
+    // -----------------------------------------------------------------------
+
+    /// Lazily construct the device/behavioral consent gate.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn device_behavioral_consent_gate(&mut self) -> &mut ConsentGate {
+        self.device_behavioral_consent_gate
+            .get_or_insert_with(|| ConsentGate::new(device_behavioral_consent_policy()))
+    }
+
+    /// Whether `did` currently holds at least one active (non-revoked,
+    /// unexpired) session at `now_ms`.
+    ///
+    /// Consent to persist device/behavioral evidence is scoped to a subject
+    /// who has already proven control of the DID through OTP-verified
+    /// session bootstrap; a DID with no live session has no basis to
+    /// self-consent to anything.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn has_active_session_for(&self, did: &Did, now_ms: u64) -> bool {
+        self.sessions.values().any(|session| {
+            session.subject_did == *did
+                && !session.revoked
+                && now_ms >= session.created_ms
+                && !session.is_expired_at(now_ms)
+        })
+    }
+
+    /// Register (idempotently) and check a self-consent grant for the
+    /// subject to allow the 0dentity device/behavioral ingestion service to
+    /// persist client-collected samples for their own scoring.
+    ///
+    /// Returns `Ok(true)` only when:
+    /// - `receipt_id` is non-empty, AND
+    /// - the subject holds an active session at `now_ms` (proof they control
+    ///   this DID), AND
+    /// - `exo_consent::gatekeeper::ConsentGate::check` returns `Granted` for
+    ///   the `zerodentity.device_behavioral_ingest` action.
+    ///
+    /// A subject with no active session can register nothing: no bailment is
+    /// proposed/accepted and the gate is never granted, so callers must
+    /// treat `Ok(false)` as "reject and persist nothing" (default-deny).
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    pub fn check_device_behavioral_consent(
+        &mut self,
+        subject_did: &Did,
+        receipt_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<bool> {
+        if receipt_id.trim().is_empty() {
+            return Ok(false);
+        }
+        if !self.has_active_session_for(subject_did, now_ms) {
+            return Ok(false);
+        }
+
+        let receipt_key = (subject_did.as_str().to_owned(), receipt_id.to_owned());
+        if !self
+            .device_behavioral_consent_receipts
+            .contains(&receipt_key)
+        {
+            self.register_device_behavioral_consent_bailment(subject_did, receipt_id, now_ms)?;
+            self.device_behavioral_consent_receipts.insert(receipt_key);
+        }
+
+        let now = Timestamp::new(now_ms, 0);
+        let decision = self
+            .device_behavioral_consent_gate()
+            .check(subject_did, DEVICE_BEHAVIORAL_CONSENT_ACTION, &now)
+            .map_err(|error| anyhow::anyhow!("device/behavioral consent check failed: {error}"))?;
+        Ok(matches!(decision, ConsentDecision::Granted { .. }))
+    }
+
+    /// Propose, self-accept (by the fixed ingestion-service bailee key), and
+    /// register a bailment granting the 0dentity device/behavioral
+    /// ingestion service processing rights over `subject_did`'s own
+    /// client-collected samples for the given `receipt_id`.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn register_device_behavioral_consent_bailment(
+        &mut self,
+        subject_did: &Did,
+        receipt_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<()> {
+        let bailee_did = device_behavioral_ingestion_service_did()?;
+        let bailment_id = format!(
+            "zerodentity-device-behavioral-consent:{}:{receipt_id}",
+            subject_did.as_str()
+        );
+        let created = Timestamp::new(now_ms.max(1), 0);
+        let mut bailment = bailment::propose(
+            subject_did,
+            &bailee_did,
+            receipt_id.as_bytes(),
+            BailmentType::Processing,
+            bailment_id,
+            created,
+        )
+        .map_err(|error| anyhow::anyhow!("device/behavioral bailment proposal failed: {error}"))?;
+
+        let keypair = device_behavioral_ingestion_service_keypair()?;
+        let payload = bailment::signing_payload(&bailment)
+            .map_err(|error| anyhow::anyhow!("bailment signing payload failed: {error}"))?;
+        let signature = keypair.sign(&payload);
+        bailment::accept(
+            &mut bailment,
+            |did| (*did == bailee_did).then_some(*keypair.public_key()),
+            &signature,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("device/behavioral bailment acceptance failed: {error}")
+        })?;
+
+        let gate = self.device_behavioral_consent_gate();
+        gate.register_bailment(bailment.clone()).map_err(|error| {
+            anyhow::anyhow!("device/behavioral bailment registration failed: {error}")
+        })?;
+        gate.register_consent(
+            subject_did,
+            DEVICE_BEHAVIORAL_CONSENT_ACTION,
+            DEVICE_BEHAVIORAL_CONSENT_ROLE,
+            DEVICE_BEHAVIORAL_CONSENT_CLEARANCE,
+            bailment,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("device/behavioral consent registration failed: {error}")
+        })?;
         Ok(())
     }
 

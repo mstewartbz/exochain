@@ -916,12 +916,31 @@ pub async fn run_holon_manager(
                             ))
                             .unwrap_or_else(|_| static_did("did:exo:candidate"));
 
-                            // Same fail-closed CBOR encoding as a real
-                            // ValidatorSetChange payload would use — this value
-                            // is never submitted as a DAG proposal, only carried
-                            // as named evidence in a RecommendationOnly event.
+                            // Recommendation-only (VCG-010 / D5, full stop):
+                            // this AddValidator is carried ONLY as named
+                            // evidence inside a RecommendationOnly governance
+                            // event and is NEVER submitted as a real
+                            // ValidatorSetChange proposal.
+                            //
+                            // VCG-015 reconciliation: AddValidator now carries
+                            // the candidate's real Ed25519 key, fail-closed
+                            // against its DID at the reactor apply path.
+                            // `PeerRegistry` holds only libp2p `PeerId`s, not
+                            // consensus keys, so no genuine candidate key exists
+                            // at recommendation time. We attach an explicit
+                            // all-zero advisory sentinel: it is not a signing key
+                            // and does NOT hash to the candidate DID, so if this
+                            // recommendation payload were ever submitted verbatim
+                            // as a real proposal, VCG-015's apply-path cross-check
+                            // (`did == did_from_public_key(public_key)`) rejects
+                            // it fail-closed. The genuine candidate key must be
+                            // supplied by whoever RATIFIES the recommendation; the
+                            // sentinel never enters any validator_public_keys
+                            // resolver. (Real key-bearing recommendations await
+                            // the PeerRegistry key-lookup follow-on.)
                             let change = ValidatorChange::AddValidator {
                                 did: candidate.clone(),
+                                public_key: PublicKey([0u8; 32]),
                             };
                             match encode_validator_change(&change) {
                                 Ok(buf) => {
@@ -950,7 +969,7 @@ pub async fn run_holon_manager(
                                     tracing::warn!(
                                         err = %e,
                                         candidate = %candidate,
-                                        "Scaling Holon: validator-set change encoding failed"
+                                        "Scaling Holon: validator-change encoding failed"
                                     );
                                 }
                             }
@@ -1812,7 +1831,7 @@ mod tests {
                             ) {
                                 let decoded: Result<ValidatorChange, _> =
                                     ciborium::from_reader(event.payload.as_slice());
-                                if let Ok(ValidatorChange::AddValidator { did }) = decoded {
+                                if let Ok(ValidatorChange::AddValidator { did, .. }) = decoded {
                                     assert!(
                                         did.to_string().starts_with("did:exo:auto-promoted-"),
                                         "unexpected AddValidator candidate: {did}"

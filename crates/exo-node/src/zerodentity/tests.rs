@@ -3110,4 +3110,1044 @@ mod tests {
             "PoP-only request without a bearer token must not persist a claim"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // VCG-009 RED — device/behavioral sample ingestion must be consent-scoped,
+    // persisted, replay-safe, bounded, and scored from STORED evidence.
+    //
+    // Ledger invariant (GAP-REGISTRY.md VCG-009): "Device and behavioral
+    // sample fields are rejected UNLESS consent-scoped, privacy-reviewed,
+    // persisted, replay-safe, and scored from STORED evidence."
+    //
+    // These tests drive the real HTTP surface
+    // (`onboarding_app` + `POST /api/v1/0dentity/claims`) using an extended
+    // body helper that carries the spec §7.1 sample fields
+    // (`device_fingerprint`, `behavioral_hash`, `signal_hashes`) which
+    // `SubmitClaimRequest` does not yet accept. They are gated on
+    // `unaudited-zerodentity-device-behavioral-axes` alone (Gate 23 tests
+    // every unaudited feature in isolation — VCG-009's own closure gate is
+    // `cargo test -p exochain-node zerodentity --features
+    // unaudited-zerodentity-device-behavioral-axes`), independent of
+    // `unaudited-zerodentity-first-touch-onboarding`.
+    // -----------------------------------------------------------------------
+
+    /// Test-only extended claim submission body carrying the spec §7.1
+    /// device/behavioral sample fields that `SubmitClaimRequest` does not
+    /// yet declare. Built independently of `signed_claim_body` (which is
+    /// gated on `unaudited-zerodentity-first-touch-onboarding`, a feature
+    /// this test group does not enable per Gate 23 isolation).
+    ///
+    /// GREEN (VCG-009 corrective) closed the proof-of-possession hole by
+    /// requiring `crypto::verify` over the canonical, sample-bound
+    /// `device_behavioral_submission_signing_payload` (see below). This
+    /// helper now signs over that exact same payload shape locally
+    /// (duplicated here per Gate 23 isolation — this test group cannot
+    /// depend on the production `session_auth` module) so that callers
+    /// exercising the "well-formed, self-signed, real samples" happy path
+    /// continue to verify against the production handler.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[allow(clippy::too_many_arguments)]
+    fn device_behavioral_claim_body(
+        subject_did: &Did,
+        claim_type: &str,
+        created_ms: u64,
+        public_keypair: &KeyPair,
+        signing_keypair: &KeyPair,
+        device_fingerprint_hex: &str,
+        behavioral_hash_hex: &str,
+        signal_hashes: &std::collections::BTreeMap<String, String>,
+        consent_receipt_id: Option<&str>,
+    ) -> Value {
+        let payload = device_behavioral_submission_signing_payload(
+            subject_did,
+            Some(device_fingerprint_hex),
+            Some(behavioral_hash_hex),
+            signal_hashes,
+            public_keypair.public_key(),
+        );
+        let signature = signing_keypair.sign(&payload);
+        serde_json::json!({
+            "subject_did": subject_did.as_str(),
+            "claim_type": claim_type,
+            "created_ms": created_ms,
+            "public_key": hex::encode(public_keypair.public_key().as_bytes()),
+            "signature": hex::encode(signature.to_bytes()),
+            "device_fingerprint": device_fingerprint_hex,
+            "behavioral_hash": behavioral_hash_hex,
+            "signal_hashes": signal_hashes,
+            "consent_receipt_id": consent_receipt_id,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // VCG-009 STRENGTHEN-RED — proof-of-possession over the sample-bound
+    // payload.
+    //
+    // The refuted green (7a7340e8) never calls `crypto::verify` in
+    // `handle_device_behavioral_ingestion`: it only checks
+    // `signature.is_empty()` after confirming `public_key` derives
+    // `subject_did` — but a DID and a public key are BOTH spec-classified
+    // Public (docs/0DENTITY-APP-SPEC.md §7.1), so that proves nothing about
+    // possession of the matching PRIVATE key. Combined with a consent gate
+    // that only requires "some session exists for this DID"
+    // (`has_active_session_for`), an attacker who merely knows a victim's
+    // public DID + public key can submit device/behavioral samples under the
+    // victim's identity with a garbage signature.
+    //
+    // This canonical payload is the binding GREEN must implement to close
+    // the hole. Domain-separated CBOR, mirroring the existing
+    // `session_auth.rs` pattern (`bootstrap_signing_payload`,
+    // `claim_submission_signing_payload`) so the fix is a natural extension
+    // of that module rather than a bespoke scheme:
+    //
+    //   DeviceBehavioralSubmissionSigningPayload {
+    //       domain: "exo.zerodentity.device_behavioral_submission.v1",
+    //       subject_did: &str,
+    //       device_fingerprint: Option<&str>,   // hex, as received on the wire
+    //       behavioral_hash: Option<&str>,      // hex, as received on the wire
+    //       signal_hashes: &BTreeMap<String, String>, // sorted key order (BTreeMap)
+    //       public_key: &PublicKey,
+    //   }
+    //   encoded via `ciborium::into_writer` (canonical CBOR, same helper
+    //   shape as `encode_cbor` in session_auth.rs).
+    //
+    // `claim_type`/`created_ms`/`provider`/`consent_receipt_id` are
+    // deliberately NOT bound into this payload: they are either routing
+    // metadata (claim_type/provider feed `parse_claim_type`, which is
+    // orthogonal to sample authenticity) or a capability reference
+    // (consent_receipt_id, checked separately by the consent gate) rather
+    // than sample content. Binding `subject_did`, the sample fields, and the
+    // signer's own `public_key` is what prevents (b) cross-account replay and
+    // (c) sample-substitution.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[derive(serde::Serialize)]
+    struct DeviceBehavioralSubmissionSigningPayload<'a> {
+        domain: &'static str,
+        subject_did: &'a str,
+        device_fingerprint: Option<&'a str>,
+        behavioral_hash: Option<&'a str>,
+        signal_hashes: &'a std::collections::BTreeMap<String, String>,
+        public_key: &'a PublicKey,
+    }
+
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    const DEVICE_BEHAVIORAL_SUBMISSION_SIGNING_DOMAIN: &str =
+        "exo.zerodentity.device_behavioral_submission.v1";
+
+    /// Builds the exact canonical bytes a correct GREEN handler must verify
+    /// the signature over. Any GREEN implementation that binds a different
+    /// byte layout will fail test (d) (the happy path) here, forcing the
+    /// signing payload shape to be an explicit, negotiated contract rather
+    /// than an implementation accident.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn device_behavioral_submission_signing_payload(
+        subject_did: &Did,
+        device_fingerprint_hex: Option<&str>,
+        behavioral_hash_hex: Option<&str>,
+        signal_hashes: &std::collections::BTreeMap<String, String>,
+        public_key: &PublicKey,
+    ) -> Vec<u8> {
+        let payload = DeviceBehavioralSubmissionSigningPayload {
+            domain: DEVICE_BEHAVIORAL_SUBMISSION_SIGNING_DOMAIN,
+            subject_did: subject_did.as_str(),
+            device_fingerprint: device_fingerprint_hex,
+            behavioral_hash: behavioral_hash_hex,
+            signal_hashes,
+            public_key,
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&payload, &mut encoded)
+            .expect("canonical CBOR encoding of test payload must not fail");
+        encoded
+    }
+
+    /// Like `device_behavioral_claim_body`, but signs over the REAL canonical
+    /// sample-bound payload (`device_behavioral_submission_signing_payload`)
+    /// with an explicit, separately-controllable signing keypair — letting
+    /// tests construct a victim's real DID/public_key while signing with an
+    /// attacker's key (cross-account), or sign over one sample set and
+    /// submit another (sample-substitution).
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[allow(clippy::too_many_arguments)]
+    fn device_behavioral_claim_body_signed_over(
+        subject_did: &Did,
+        claim_type: &str,
+        created_ms: u64,
+        public_keypair: &KeyPair,
+        signing_keypair: &KeyPair,
+        signed_device_fingerprint_hex: Option<&str>,
+        signed_behavioral_hash_hex: Option<&str>,
+        signed_signal_hashes: &std::collections::BTreeMap<String, String>,
+        submitted_device_fingerprint_hex: &str,
+        submitted_behavioral_hash_hex: &str,
+        submitted_signal_hashes: &std::collections::BTreeMap<String, String>,
+        consent_receipt_id: Option<&str>,
+    ) -> Value {
+        let payload = device_behavioral_submission_signing_payload(
+            subject_did,
+            signed_device_fingerprint_hex,
+            signed_behavioral_hash_hex,
+            signed_signal_hashes,
+            public_keypair.public_key(),
+        );
+        let signature = signing_keypair.sign(&payload);
+        serde_json::json!({
+            "subject_did": subject_did.as_str(),
+            "claim_type": claim_type,
+            "created_ms": created_ms,
+            "public_key": hex::encode(public_keypair.public_key().as_bytes()),
+            "signature": hex::encode(signature.to_bytes()),
+            "device_fingerprint": submitted_device_fingerprint_hex,
+            "behavioral_hash": submitted_behavioral_hash_hex,
+            "signal_hashes": submitted_signal_hashes,
+            "consent_receipt_id": consent_receipt_id,
+        })
+    }
+
+    /// A syntactically well-formed but cryptographically meaningless
+    /// signature: parses fine via `signature_from_hex` (64 bytes of hex) but
+    /// was never produced by any real Ed25519 signing operation over
+    /// anything. Stands in for "attacker has no private key at all and just
+    /// fills the field with junk."
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn garbage_signature_hex() -> String {
+        hex::encode([0xAAu8; 64])
+    }
+
+    /// Always-compiled (no feature gate — runs in every build including the
+    /// default no-features build and the VCG-009 axes-on gate build alike):
+    /// proves the score engine's default-off behavior at the scoring layer
+    /// is exactly `device_behavioral_axes_enabled()`, never hard-coded true
+    /// or false. This does not touch — and must not weaken — the existing
+    /// `list_fingerprints_refused_without_device_behavioral_feature_flag`
+    /// HTTP refusal test; it re-asserts the same default-off invariant at
+    /// the scoring layer so the guarantee holds regardless of which HTTP
+    /// route a future refactor puts sample reads behind.
+    #[test]
+    fn device_behavioral_axes_score_tracks_feature_flag_exactly() {
+        let did = td("vcg009-default-off");
+        let fp = make_fingerprint("default-off", 1_000);
+        let sample =
+            make_behavioral_sample("default-off", BehavioralSignalType::MouseDynamics, 1_000);
+
+        let score = ZerodentityScore::compute(&did, &[], &[fp], &[sample], 5_000);
+
+        if crate::zerodentity::device_behavioral_axes_enabled() {
+            assert!(
+                score.axes.device_trust > 0,
+                "device_trust must be non-zero from stored fingerprints when the axes feature is ON"
+            );
+            assert!(
+                score.axes.behavioral_signature > 0,
+                "behavioral_signature must be non-zero from stored samples when the axes feature is ON"
+            );
+        } else {
+            assert_eq!(
+                score.axes.device_trust, 0,
+                "device_trust must stay 0 while unaudited-zerodentity-device-behavioral-axes is off, \
+                 even when fingerprints are present in the evidence slice"
+            );
+            assert_eq!(
+                score.axes.behavioral_signature, 0,
+                "behavioral_signature must stay 0 while unaudited-zerodentity-device-behavioral-axes is off, \
+                 even when behavioral samples are present in the evidence slice"
+            );
+        }
+    }
+
+    /// (a) A submit carrying device/behavioral sample fields WITHOUT a valid,
+    /// in-scope consent record is rejected and NOTHING is persisted.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_with_device_behavioral_fields_without_consent_is_rejected_and_not_persisted()
+     {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(209);
+        let did = derived_did(&keypair);
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([7u8; 32]));
+        signal_hashes.insert("WebGLParameters".to_owned(), hex::encode([8u8; 32]));
+
+        let body = device_behavioral_claim_body(
+            &did,
+            "DisplayName",
+            1_700_100_001,
+            &keypair,
+            &keypair,
+            &hex::encode([9u8; 32]),
+            &hex::encode([10u8; 32]),
+            &signal_hashes,
+            None, // no consent receipt at all
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let body = body_json(resp).await;
+
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::BAD_REQUEST,
+            "submitting device/behavioral sample fields without an in-scope consent record \
+             must be refused (403/400), got {status}: {body}"
+        );
+        // The refusal must name consent as the reason — a generic
+        // "first-touch onboarding disabled" refusal (today's actual
+        // behavior under this feature alone) is not evidence that consent
+        // scoping was ever evaluated.
+        let error_text = body["error"].as_str().unwrap_or_default();
+        let message_text = body["message"].as_str().unwrap_or_default();
+        assert!(
+            error_text.contains("consent") || message_text.contains("consent"),
+            "the refusal for a device/behavioral submit with no consent record must cite \
+             consent as the reason, got: {body}"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
+            "no consent record must mean nothing is persisted to the fingerprint store"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_behavioral_samples(&did)
+                .unwrap()
+                .is_empty(),
+            "no consent record must mean nothing is persisted to the behavioral sample store"
+        );
+    }
+
+    /// (b) A submit WITH a valid consent record persists the samples via
+    /// put_fingerprint/put_behavioral, and a subsequent get_score reflects a
+    /// non-zero device_trust / behavioral_signature axis derived from the
+    /// STORED samples (not from the request echo).
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_with_valid_consent_persists_samples_and_scores_from_store() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(210);
+        let did = derived_did(&keypair);
+        let token = "vcg009-consent-session-token";
+
+        // Simulate an owner session the way other authenticated flows do —
+        // GREEN must define how a consent receipt is actually registered
+        // (exo_consent::gatekeeper::ConsentGate) and looked up here; this ID
+        // is a placeholder for "a valid, in-scope consent record exists".
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-valid-consent-receipt-01";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([11u8; 32]));
+        signal_hashes.insert("WebGLParameters".to_owned(), hex::encode([12u8; 32]));
+        signal_hashes.insert("UserAgent".to_owned(), hex::encode([13u8; 32]));
+
+        let body = device_behavioral_claim_body(
+            &did,
+            "DisplayName",
+            1_700_100_002,
+            &keypair,
+            &keypair,
+            &hex::encode([14u8; 32]),
+            &hex::encode([15u8; 32]),
+            &signal_hashes,
+            Some(consent_receipt_id),
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a submit with a valid, in-scope consent record must succeed"
+        );
+
+        let fingerprints = store.lock().unwrap().get_fingerprints(&did).unwrap();
+        assert_eq!(
+            fingerprints.len(),
+            1,
+            "a consented submit must persist exactly one device fingerprint via put_fingerprint"
+        );
+        let behavioral = store.lock().unwrap().get_behavioral_samples(&did).unwrap();
+        assert_eq!(
+            behavioral.len(),
+            1,
+            "a consented submit must persist exactly one behavioral sample via put_behavioral"
+        );
+
+        // Score must reflect STORED evidence, not merely echo the request.
+        let claims: Vec<_> = store
+            .lock()
+            .unwrap()
+            .get_claims(&did)
+            .unwrap()
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect();
+        let score = ZerodentityScore::compute(&did, &claims, &fingerprints, &behavioral, 5_000_000);
+        assert!(
+            score.axes.device_trust > 0,
+            "device_trust axis must be non-zero once fingerprints are persisted and read back \
+             from the store, got {}",
+            score.axes.device_trust
+        );
+        assert!(
+            score.axes.behavioral_signature > 0,
+            "behavioral_signature axis must be non-zero once behavioral samples are persisted \
+             and read back from the store, got {}",
+            score.axes.behavioral_signature
+        );
+
+        // And the HTTP score endpoint (the actual production read path) must
+        // report the same thing — not just the direct store/scoring call.
+        let score_resp = get_with_auth(
+            &app_with_api(store.clone()),
+            &format!("/api/v1/0dentity/{}/score", did.as_str()),
+            token,
+        )
+        .await;
+        assert_eq!(score_resp.status(), StatusCode::OK);
+        let score_body = body_json(score_resp).await;
+        assert!(
+            score_body["axes"]["device_trust"].as_u64().unwrap_or(0) > 0,
+            "GET /score must reflect the persisted device fingerprint, got {score_body}"
+        );
+        assert!(
+            score_body["axes"]["behavioral_signature"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "GET /score must reflect the persisted behavioral sample, got {score_body}"
+        );
+    }
+
+    /// Small helper standing in for wiring the onboarding store into the
+    /// score-reading `api_app` router — VCG-009 must close this loop so a
+    /// consented submit through onboarding is visible through the scoring
+    /// API against the SAME store.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    fn app_with_api(store: SharedZerodentityStore) -> Router {
+        api_app(store)
+    }
+
+    /// (c) Replay-safety: submitting the same sample payload twice does not
+    /// double-count / inflate the score (idempotent or explicitly deduped by
+    /// content hash); a stale/replayed sample is rejected or ignored.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_replayed_device_behavioral_sample_does_not_double_count() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(211);
+        let did = derived_did(&keypair);
+        let token = "vcg009-replay-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-valid-consent-receipt-02";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([21u8; 32]));
+
+        let fingerprint_hex = hex::encode([22u8; 32]);
+        let behavioral_hex = hex::encode([23u8; 32]);
+
+        let body = device_behavioral_claim_body(
+            &did,
+            "DisplayName",
+            1_700_100_003,
+            &keypair,
+            &keypair,
+            &fingerprint_hex,
+            &behavioral_hex,
+            &signal_hashes,
+            Some(consent_receipt_id),
+        );
+
+        let first = post_json(&app, "/api/v1/0dentity/claims", body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Replay the identical sample payload (same composite hashes, same
+        // captured_ms semantics) a second time.
+        let second = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        assert!(
+            second.status() == StatusCode::OK || second.status() == StatusCode::CONFLICT,
+            "a replayed identical sample submission must either be idempotently accepted \
+             or explicitly rejected as a duplicate, got {}",
+            second.status()
+        );
+
+        let fingerprints = store.lock().unwrap().get_fingerprints(&did).unwrap();
+        assert_eq!(
+            fingerprints.len(),
+            1,
+            "replaying the identical device fingerprint payload must not create a second \
+             stored fingerprint entry (dedup by content hash), got {} entries",
+            fingerprints.len()
+        );
+        let behavioral = store.lock().unwrap().get_behavioral_samples(&did).unwrap();
+        assert_eq!(
+            behavioral.len(),
+            1,
+            "replaying the identical behavioral sample payload must not create a second \
+             stored behavioral entry (dedup by content hash), got {} entries",
+            behavioral.len()
+        );
+    }
+
+    /// (d) Bounded ingestion: oversized or over-count sample payloads are
+    /// rejected (documented cap), no unbounded growth.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_oversized_signal_hashes_map_is_rejected() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(212);
+        let did = derived_did(&keypair);
+        let token = "vcg009-bounds-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-valid-consent-receipt-03";
+
+        // FingerprintSignal only has 15 documented variants (types.rs); an
+        // over-count map like this cannot correspond to real signal types
+        // and must be rejected as exceeding the documented ingestion cap.
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        for i in 0..500u32 {
+            let byte = u8::try_from(i % 256).unwrap_or(0);
+            signal_hashes.insert(format!("UnknownSignal{i}"), hex::encode([byte; 32]));
+        }
+
+        let body = device_behavioral_claim_body(
+            &did,
+            "DisplayName",
+            1_700_100_004,
+            &keypair,
+            &keypair,
+            &hex::encode([30u8; 32]),
+            &hex::encode([31u8; 32]),
+            &signal_hashes,
+            Some(consent_receipt_id),
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an oversized signal_hashes map must be rejected under the documented ingestion \
+             cap, got {}",
+            resp.status()
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
+            "a rejected oversized payload must not persist a partial fingerprint"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // VCG-009 STRENGTHEN-RED (corrective) — crypto-verified proof-of-
+    // possession. These tests FAIL against the refuted green (7a7340e8):
+    // `handle_device_behavioral_ingestion` never calls `crypto::verify`, so
+    // it accepts a syntactically well-formed but cryptographically
+    // meaningless signature as long as `public_key` derives `subject_did`
+    // (proves nothing — a DID and public key are both Public per spec §7.1)
+    // and SOME session exists for that DID (self-consent, not proof of
+    // possession).
+    // -----------------------------------------------------------------------
+
+    /// (a) A device/behavioral submit whose signature does NOT
+    /// cryptographically verify against `subject_did`'s public key over the
+    /// canonical sample-bound payload must be REJECTED (401) and must
+    /// persist NOTHING — even though `public_key` correctly derives
+    /// `subject_did` and a live session exists (so the current, broken
+    /// consent gate alone would happily grant this).
+    ///
+    /// FAILS against 7a7340e8: the handler only checks
+    /// `signature.is_empty()`, so 64 bytes of `0xAA` sail straight through.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_with_non_verifying_signature_is_rejected_and_not_persisted() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(220);
+        let did = derived_did(&keypair);
+        let token = "vcg009-pop-garbage-session-token";
+
+        // A live session exists for this DID — proves the old consent gate
+        // (has_active_session_for) is satisfied, isolating the failure to
+        // the missing crypto::verify call specifically.
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-pop-garbage-consent-receipt";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([40u8; 32]));
+
+        let fingerprint_hex = hex::encode([41u8; 32]);
+        let behavioral_hex = hex::encode([42u8; 32]);
+
+        // Build the request body directly (not via
+        // device_behavioral_claim_body_signed_over) so the `signature` field
+        // is unambiguously garbage rather than a signature over some other
+        // payload — this isolates "no valid signature at all" from the
+        // cross-account/substitution cases below.
+        let body = serde_json::json!({
+            "subject_did": did.as_str(),
+            "claim_type": "DisplayName",
+            "created_ms": 1_700_100_010u64,
+            "public_key": hex::encode(keypair.public_key().as_bytes()),
+            "signature": garbage_signature_hex(),
+            "device_fingerprint": fingerprint_hex,
+            "behavioral_hash": behavioral_hex,
+            "signal_hashes": signal_hashes,
+            "consent_receipt_id": consent_receipt_id,
+        });
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let body = body_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a device/behavioral submit whose signature does not cryptographically verify \
+             must be rejected 401, got {status}: {body}"
+        );
+
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
+            "a non-verifying signature must mean nothing is persisted to the fingerprint store"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_behavioral_samples(&did)
+                .unwrap()
+                .is_empty(),
+            "a non-verifying signature must mean nothing is persisted to the behavioral \
+             sample store"
+        );
+        assert!(
+            store.lock().unwrap().get_claims(&did).unwrap().is_empty(),
+            "a non-verifying signature must mean no claim is persisted either"
+        );
+    }
+
+    /// (b) Cross-account attack: the attacker constructs the VICTIM's real
+    /// `subject_did` and real `public_key` (both public, both harvestable),
+    /// but signs the submission with the ATTACKER's own private key instead
+    /// of the victim's. A live session exists for the victim (self-consent
+    /// would otherwise grant it). This must be REJECTED and NOTHING
+    /// persisted to the victim's store.
+    ///
+    /// FAILS against 7a7340e8: signature.is_empty() is false (the attacker's
+    /// signature bytes are non-empty), so this sails through and the
+    /// attacker's fabricated samples land in the victim's fingerprint/
+    /// behavioral stores.
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_signed_by_attacker_key_for_victim_did_is_rejected_and_not_persisted() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let victim_keypair = test_keypair(221);
+        let victim_did = derived_did(&victim_keypair);
+        let attacker_keypair = test_keypair(222);
+        let token = "vcg009-pop-cross-account-session-token";
+
+        // The victim has a live session — the exact condition the current
+        // has_active_session_for-based consent gate treats as sufficient.
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&victim_did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-pop-cross-account-consent-receipt";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([50u8; 32]));
+        let fingerprint_hex = hex::encode([51u8; 32]);
+        let behavioral_hex = hex::encode([52u8; 32]);
+
+        // The request carries the VICTIM's subject_did and public_key (so
+        // `derived_did == subject_did` passes), but the payload is signed by
+        // the ATTACKER's key.
+        let body = device_behavioral_claim_body_signed_over(
+            &victim_did,
+            "DisplayName",
+            1_700_100_011,
+            &victim_keypair, // public_key on the wire: victim's (correct derivation)
+            &attacker_keypair, // signing_keypair: attacker's — the attack
+            Some(&fingerprint_hex),
+            Some(&behavioral_hex),
+            &signal_hashes,
+            &fingerprint_hex,
+            &behavioral_hex,
+            &signal_hashes,
+            Some(consent_receipt_id),
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let body = body_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a submission signed by an attacker's key over a victim's subject_did/public_key \
+             must be rejected 401 even though the victim holds an active session, got \
+             {status}: {body}"
+        );
+
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&victim_did)
+                .unwrap()
+                .is_empty(),
+            "an attacker-signed submission must not persist a fingerprint into the victim's store"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_behavioral_samples(&victim_did)
+                .unwrap()
+                .is_empty(),
+            "an attacker-signed submission must not persist a behavioral sample into the \
+             victim's store"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_claims(&victim_did)
+                .unwrap()
+                .is_empty(),
+            "an attacker-signed submission must not persist a claim under the victim's DID"
+        );
+    }
+
+    /// (b-alt) Same cross-account attack, but the attacker doesn't even
+    /// bother deriving a real key pair for the "signature" — plain garbage
+    /// bytes, over the victim's real DID + public_key, with the victim's
+    /// active session in place. Belt-and-suspenders alongside the dedicated
+    /// attacker-keypair variant above: proves the hole isn't merely
+    /// "signature must decode as 64 bytes" but "signature must verify".
+    ///
+    /// FAILS against 7a7340e8 for the same reason as (a).
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_garbage_signature_over_victim_identity_is_rejected_and_not_persisted() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let victim_keypair = test_keypair(223);
+        let victim_did = derived_did(&victim_keypair);
+        let token = "vcg009-pop-cross-account-garbage-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&victim_did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-pop-cross-account-garbage-consent-receipt";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("WebGLParameters".to_owned(), hex::encode([53u8; 32]));
+        let fingerprint_hex = hex::encode([54u8; 32]);
+        let behavioral_hex = hex::encode([55u8; 32]);
+
+        let body = serde_json::json!({
+            "subject_did": victim_did.as_str(),
+            "claim_type": "DisplayName",
+            "created_ms": 1_700_100_012u64,
+            "public_key": hex::encode(victim_keypair.public_key().as_bytes()),
+            "signature": garbage_signature_hex(),
+            "device_fingerprint": fingerprint_hex,
+            "behavioral_hash": behavioral_hex,
+            "signal_hashes": signal_hashes,
+            "consent_receipt_id": consent_receipt_id,
+        });
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let body = body_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an attacker who knows only a victim's public DID + public key, with a garbage \
+             signature, must be rejected 401 even though the victim holds an active session, \
+             got {status}: {body}"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&victim_did)
+                .unwrap()
+                .is_empty(),
+            "the confirmed VCG-009 exploit path must not persist a fingerprint for the victim"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_behavioral_samples(&victim_did)
+                .unwrap()
+                .is_empty(),
+            "the confirmed VCG-009 exploit path must not persist a behavioral sample for the \
+             victim"
+        );
+    }
+
+    /// (c) Sample-substitution: a signature validly produced by the
+    /// subject's own key over sample set A (fingerprint/behavioral/signal
+    /// hashes A) must NOT authorize submitting a DIFFERENT sample set B on
+    /// the wire. If the payload weren't sample-bound, an on-path attacker
+    /// (or the subject's own compromised client) could swap in arbitrary
+    /// fabricated evidence under a signature that was only ever meant to
+    /// authorize the original samples.
+    ///
+    /// FAILS against 7a7340e8: the handler never calls crypto::verify at
+    /// all, so it cannot possibly notice that the signature (whatever it
+    /// covers) doesn't match the submitted sample bytes — this test is
+    /// really "no sample-binding exists" wearing the substitution framing,
+    /// and it fails for the same root reason as (a)/(b).
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_signature_over_different_samples_is_rejected_and_not_persisted() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(224);
+        let did = derived_did(&keypair);
+        let token = "vcg009-pop-substitution-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-pop-substitution-consent-receipt";
+
+        // Sample set A — what the signature is REALLY over.
+        let mut signal_hashes_a = std::collections::BTreeMap::new();
+        signal_hashes_a.insert("CanvasRendering".to_owned(), hex::encode([60u8; 32]));
+        let fingerprint_hex_a = hex::encode([61u8; 32]);
+        let behavioral_hex_a = hex::encode([62u8; 32]);
+
+        // Sample set B — what actually gets submitted on the wire, under the
+        // signature that was only ever produced over set A.
+        let mut signal_hashes_b = std::collections::BTreeMap::new();
+        signal_hashes_b.insert("WebGLParameters".to_owned(), hex::encode([63u8; 32]));
+        let fingerprint_hex_b = hex::encode([64u8; 32]);
+        let behavioral_hex_b = hex::encode([65u8; 32]);
+
+        let body = device_behavioral_claim_body_signed_over(
+            &did,
+            "DisplayName",
+            1_700_100_013,
+            &keypair,
+            &keypair, // subject signs with their OWN key — over set A
+            Some(&fingerprint_hex_a),
+            Some(&behavioral_hex_a),
+            &signal_hashes_a,
+            &fingerprint_hex_b, // but set B is what's actually submitted
+            &behavioral_hex_b,
+            &signal_hashes_b,
+            Some(consent_receipt_id),
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let body = body_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a signature validly produced over one sample set must not authorize submitting \
+             a different sample set, got {status}: {body}"
+        );
+
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_fingerprints(&did)
+                .unwrap()
+                .is_empty(),
+            "sample-substitution must not persist the substituted fingerprint (set B)"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_behavioral_samples(&did)
+                .unwrap()
+                .is_empty(),
+            "sample-substitution must not persist the substituted behavioral sample (set B)"
+        );
+    }
+
+    /// (d) Happy path: a submit whose signature is a REAL Ed25519 signature
+    /// by `subject_did`'s own private key, over the canonical sample-bound
+    /// payload for the SAME samples actually submitted, with a valid
+    /// in-scope consent record, must be ACCEPTED and persisted — and
+    /// `get_score` (both the direct scoring call and the real `GET /score`
+    /// HTTP surface) must reflect the stored samples. This must keep passing
+    /// once GREEN closes (a)-(c); it is the control proving the fix isn't
+    /// simply "reject everything".
+    #[cfg(feature = "unaudited-zerodentity-device-behavioral-axes")]
+    #[tokio::test]
+    async fn submit_claim_with_real_signature_over_canonical_payload_is_accepted_and_scored() {
+        let store = new_shared_store();
+        let app = onboarding_app(store.clone());
+        let keypair = test_keypair(225);
+        let did = derived_did(&keypair);
+        let token = "vcg009-pop-happy-path-session-token";
+
+        store
+            .lock()
+            .unwrap()
+            .insert_session(&make_session(&did, token, 1_000_000))
+            .unwrap();
+        let consent_receipt_id = "vcg009-pop-happy-path-consent-receipt";
+
+        let mut signal_hashes = std::collections::BTreeMap::new();
+        signal_hashes.insert("CanvasRendering".to_owned(), hex::encode([70u8; 32]));
+        signal_hashes.insert("WebGLParameters".to_owned(), hex::encode([71u8; 32]));
+        let fingerprint_hex = hex::encode([72u8; 32]);
+        let behavioral_hex = hex::encode([73u8; 32]);
+
+        let body = device_behavioral_claim_body_signed_over(
+            &did,
+            "DisplayName",
+            1_700_100_014,
+            &keypair,
+            &keypair, // real signature, subject's own key, over these exact samples
+            Some(&fingerprint_hex),
+            Some(&behavioral_hex),
+            &signal_hashes,
+            &fingerprint_hex,
+            &behavioral_hex,
+            &signal_hashes,
+            Some(consent_receipt_id),
+        );
+
+        let resp = post_json(&app, "/api/v1/0dentity/claims", body).await;
+        let status = resp.status();
+        let resp_body = body_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a submit with a real signature over the canonical sample-bound payload, matching \
+             consent, must be accepted, got {status}: {resp_body}"
+        );
+
+        let fingerprints = store.lock().unwrap().get_fingerprints(&did).unwrap();
+        assert_eq!(
+            fingerprints.len(),
+            1,
+            "the verified submit must persist exactly one device fingerprint"
+        );
+        let behavioral = store.lock().unwrap().get_behavioral_samples(&did).unwrap();
+        assert_eq!(
+            behavioral.len(),
+            1,
+            "the verified submit must persist exactly one behavioral sample"
+        );
+
+        let claims: Vec<_> = store
+            .lock()
+            .unwrap()
+            .get_claims(&did)
+            .unwrap()
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect();
+        let score = ZerodentityScore::compute(&did, &claims, &fingerprints, &behavioral, 5_000_000);
+        assert!(
+            score.axes.device_trust > 0,
+            "device_trust axis must be non-zero once the verified fingerprint is persisted and \
+             read back from the store, got {}",
+            score.axes.device_trust
+        );
+        assert!(
+            score.axes.behavioral_signature > 0,
+            "behavioral_signature axis must be non-zero once the verified behavioral sample is \
+             persisted and read back from the store, got {}",
+            score.axes.behavioral_signature
+        );
+
+        // Real HTTP score surface must agree.
+        let score_resp = get_with_auth(
+            &app_with_api(store.clone()),
+            &format!("/api/v1/0dentity/{}/score", did.as_str()),
+            token,
+        )
+        .await;
+        assert_eq!(score_resp.status(), StatusCode::OK);
+        let score_body = body_json(score_resp).await;
+        assert!(
+            score_body["axes"]["device_trust"].as_u64().unwrap_or(0) > 0,
+            "GET /score must reflect the persisted, crypto-verified device fingerprint, got \
+             {score_body}"
+        );
+        assert!(
+            score_body["axes"]["behavioral_signature"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0,
+            "GET /score must reflect the persisted, crypto-verified behavioral sample, got \
+             {score_body}"
+        );
+    }
+
+    /// exo-consent must be genuinely referenced from the zerodentity module
+    /// (VCG-009 requires removing it from cargo-machete's ignored list once
+    /// it is actually used) — this is a source-scan guard so a future GREEN
+    /// cannot satisfy the other tests in this block with a fake/local stand-
+    /// in for consent scoping instead of the real exo-consent crate.
+    #[test]
+    fn zerodentity_module_references_exo_consent_crate() {
+        let sources = [
+            include_str!("onboarding.rs"),
+            include_str!("api.rs"),
+            include_str!("store.rs"),
+            include_str!("mod.rs"),
+        ];
+        let references_exo_consent = sources
+            .iter()
+            .any(|src| src.contains("exo_consent::") || src.contains("use exo_consent"));
+        assert!(
+            references_exo_consent,
+            "the zerodentity module must reference the exo_consent crate to gate device/\
+             behavioral sample persistence on real consent scoping, not a bespoke stand-in"
+        );
+    }
 }
