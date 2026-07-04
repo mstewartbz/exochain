@@ -1,0 +1,29 @@
+{
+  "name": "livesafe-server",
+  "version": "1.0.0",
+  "description": "LiveSafe.ai Backend API - Patient-sovereign health identity system",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js",
+    "migrate": "node db/migrate.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "embedded-postgres": "^18.3.0-beta.16",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.4",
+    "helmet": "^7.1.0",
+    "jimp": "^1.6.0",
+    "jsonwebtoken": "^9.0.2",
+    "jsqr": "^1.4.0",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^8.0.10",
+    "pdfkit": "^0.13.0",
+    "pg": "^8.11.3",
+    "qrcode": "^1.5.3",
+    "uuid": "^9.0.0"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "surface": "LiveSafe",
+  "repository": "github.com/bob-stewart/livesafe",
+  "owner": "bob-stewart",
+  "classification": "adjacent-surface",
+  "releaseStatus": "prototype",
+  "constitutionalTrustClaimsAllowed": false,
+  "exochainReferenceRepository": "github.com/exochain/exochain",
+  "runtimeAdapter": {
+    "status": "verified",
+    "canReadExochainCoreState": true,
+    "canWriteExochainCoreState": true,
+    "canMintConsentAuthorityProvenanceOrGovernanceOutcomes": false
+  },
+  "dataBoundary": {
+    "rawSensitiveDataOnChain": false,
+    "allowedExochainRecordsAfterVerifiedAdapter": [
+      "commitments",
+      "hashes",
+      "policy-references",
+      "access-logs",
+      "custody-receipts"
+    ]
+  },
+  "testCommand": "npm run quality",
+  "secrets": [],
+  "disablementPath": "Keep `config/exochain-primitives.json` at `runtimeAdapterStatus: not-wired` so `server/utils/livesafe-exochain-adapter.js` denies EXOCHAIN transport calls and public trust status remains fail-closed."
+}

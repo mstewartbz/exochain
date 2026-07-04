@@ -1,0 +1,32 @@
+{
+  "name": "livesafe",
+  "version": "1.0.0",
+  "description": "LiveSafe.ai - emergency access and consent-bound health records",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\" \"cd responder && npm run dev\"",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install && cd ../responder && npm install",
+    "build": "cd client && npm run build && cd ../responder && npm run build",
+    "context:lint": "node scripts/validate-context.mjs",
+    "rust:fmt": "cargo fmt --all -- --check",
+    "rust:clippy": "cargo clippy --all-targets -- -D warnings",
+    "rust:test": "cargo test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "quality": "npm run context:lint && npm run typecheck && npm test && npm run rust:fmt && npm run rust:clippy && npm run rust:test"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "dependencies": {
+    "pdfkit": "^0.17.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "concurrently": "^8.2.2",
+    "playwright": "^1.60.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}
