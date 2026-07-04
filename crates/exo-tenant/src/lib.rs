@@ -21,6 +21,7 @@
 pub mod cold;
 pub mod cold_storage;
 pub mod error;
+pub mod metering;
 pub mod shard;
 pub mod sharding;
 pub mod store;
