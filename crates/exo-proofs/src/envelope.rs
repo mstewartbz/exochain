@@ -114,16 +114,33 @@ pub const UNAUDITED_BLAKE3_STANDIN_BACKEND_ID: BackendId = BackendId::UnauditedB
 /// `Unknown` accepts.
 ///
 /// Ratified decision D1 (2026-07-02, see `GAP-REGISTRY.md` VCG-001) selects
-/// RISC Zero as the production backend family. No production backend
-/// variant is added in this lane (VCG-001a) — that is lane VCG-001b, scoped
-/// out here. The only concrete backend registered today is the crate's
-/// existing unaudited blake3 stand-in.
+/// RISC Zero as the production backend family. Lane VCG-001b registers the
+/// [`BackendId::RiscZero`] variant and a fail-closed verifier *seam* for it
+/// (see [`RiscZeroReceiptVerifier`] and [`ProofEnvelope::verify`]) — but does
+/// **not** vendor the `risc0-zkvm` crate or wire an actual cryptographic
+/// verify call. Per D1, the audited risc0 proving/verification toolchain is
+/// itself a reviewed-dependency supply-chain event that "carries the
+/// external audit budget"; adding it is out of scope until that review
+/// happens. Until then, [`BackendId::RiscZero`] is registered as
+/// [`AuditStatus::PendingExternalReview`] and always fails closed at
+/// verify-time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendId {
     /// The crate's existing unaudited blake3 "stand-in" cryptography
     /// (`circuit.rs` / `snark.rs` / `stark.rs` / `zkml.rs`). Gated behind
     /// the `unaudited-pedagogical-proofs` feature at verification time.
     UnauditedBlake3Standin,
+    /// RISC Zero zkVM execution-receipt backend (ratified decision D1,
+    /// 2026-07-02, `GAP-REGISTRY.md` VCG-001). This variant exists so
+    /// envelopes can *name* the selected production backend family — it is
+    /// the integration seam, not a working verifier. No external
+    /// cryptographic review of the risc0 verify path has happened yet, so
+    /// this backend is registered under [`AuditStatus::PendingExternalReview`]
+    /// (never [`AuditStatus::ProductionReviewed`]) and
+    /// [`ProofEnvelope::verify`] always fails closed for it. See
+    /// [`RiscZeroReceiptVerifier`] for exactly where the audited risc0
+    /// verify call plugs in once review lands.
+    RiscZero,
     /// An unrecognized or future backend id. Always fails closed in
     /// [`ProofEnvelope::validate_backend`] — this crate refuses to treat an
     /// id it does not recognize as valid, regardless of the numeric value.
@@ -148,20 +165,32 @@ impl BackendId {
 /// This is a minimal accessor, not a verification mechanism: it exists so
 /// tests (and future callers) can ask "does a production-reviewed backend
 /// exist yet?" without hardcoding backend ids. Today every registered
-/// backend is [`AuditStatus::Pedagogical`] — no [`AuditStatus::ProductionReviewed`]
-/// entry exists until VCG-001b lands a real production backend with a wired
-/// verifier (see `tests/refusal.rs`'s standing red).
+/// backend is either [`AuditStatus::Pedagogical`] or
+/// [`AuditStatus::PendingExternalReview`] — no [`AuditStatus::ProductionReviewed`]
+/// entry exists yet. Registering one is itself the claim that external
+/// cryptographic review has happened; see `tests/refusal.rs`'s standing red
+/// and `tests/riscz_verifier_scaffold.rs`'s anti-overclaim regression locks,
+/// both of which must keep failing/holding until that review actually lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditStatus {
     /// Structural/pedagogical stand-in only — not a production trust claim.
     /// Gated behind the `unaudited-pedagogical-proofs` feature at
     /// verification time (see [`crate::guard_unaudited`]).
     Pedagogical,
+    /// Integration wired but **not yet cryptographically reviewed**; not a
+    /// production trust claim. Used for backends (e.g.
+    /// [`BackendId::RiscZero`]) whose envelope shape and verifier *seam*
+    /// exist in-tree, but whose actual verify path has not undergone
+    /// external cryptographic review. [`ProofEnvelope::verify`] always fails
+    /// closed for backends in this status — the seam exists so that
+    /// wiring in the audited verifier later is a small, localized change,
+    /// not a claim that it is safe to trust today.
+    PendingExternalReview,
     /// A production backend that has undergone cryptographic review and
     /// carries its own audit evidence. Exempt from the pedagogical
     /// unaudited-refusal gate. No backend holds this status yet — it is
     /// introduced here only so the registry has somewhere to record one
-    /// once VCG-001b lands.
+    /// once external review of a production backend actually lands.
     ProductionReviewed,
 }
 
@@ -181,16 +210,98 @@ pub struct BackendDescriptor {
 /// hardening pass: it lets callers (and tests) inspect what backends are
 /// registered and whether any of them are [`AuditStatus::ProductionReviewed`]
 /// without reaching into [`ProofEnvelope::verify`] internals. Today this
-/// returns exactly one entry — the unaudited blake3 stand-in, marked
-/// [`AuditStatus::Pedagogical`] — because no production backend has been
-/// registered yet (VCG-001b, ratified decision D1, out of scope for
-/// VCG-001a).
+/// returns two entries:
+///
+/// - the unaudited blake3 stand-in, marked [`AuditStatus::Pedagogical`];
+/// - the RISC Zero integration seam (VCG-001b, ratified decision D1),
+///   marked [`AuditStatus::PendingExternalReview`] — wired but not yet
+///   cryptographically reviewed.
+///
+/// Neither entry is [`AuditStatus::ProductionReviewed`]: no backend has
+/// undergone external cryptographic review yet. See
+/// `tests/riscz_verifier_scaffold.rs`'s anti-overclaim regression locks.
 #[must_use]
 pub fn default_registry() -> Vec<BackendDescriptor> {
-    vec![BackendDescriptor {
-        backend_id: BackendId::UnauditedBlake3Standin,
-        audit_status: AuditStatus::Pedagogical,
-    }]
+    vec![
+        BackendDescriptor {
+            backend_id: BackendId::UnauditedBlake3Standin,
+            audit_status: AuditStatus::Pedagogical,
+        },
+        BackendDescriptor {
+            backend_id: BackendId::RiscZero,
+            audit_status: AuditStatus::PendingExternalReview,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// RiscZero verifier-integration seam (VCG-001b)
+// ---------------------------------------------------------------------------
+
+/// Integration seam for the audited RISC Zero receipt verifier.
+///
+/// Ratified decision D1 (2026-07-02, `GAP-REGISTRY.md` VCG-001) selects RISC
+/// Zero as the production backend family, with Groth16 wrapping for receipt
+/// compression, server-side-only proving, and a verifier that "stays small,
+/// in-workspace, and pinned, and carries the external audit budget." That
+/// audit has not happened yet, and the `risc0-zkvm` crate itself is not a
+/// workspace dependency — vendoring it is precisely the reviewed-dependency
+/// supply-chain event D1 defers until review lands.
+///
+/// This trait exists so that event has exactly one, small, localized
+/// plug-in point: **this is where the audited risc0 `Receipt::verify` (or
+/// equivalent image-id-bound verification) call goes.** Implementing this
+/// trait against the real `risc0-zkvm` verifier — and swapping
+/// [`ProofEnvelope::verify`]'s `BackendId::RiscZero` arm to call it instead
+/// of failing closed — is the entire VCG-001c (or later) green-stage change.
+/// Until then, [`FailClosedRiscZeroVerifier`] is the only implementation,
+/// and it never returns `Ok(true)`.
+pub trait RiscZeroReceiptVerifier {
+    /// Verifies a RISC Zero execution receipt against the given image id
+    /// (or verifier key bytes) and public inputs.
+    ///
+    /// # Errors
+    ///
+    /// Real implementations return `Err` for any receipt that does not
+    /// verify. The [`FailClosedRiscZeroVerifier`] default always returns
+    /// `Err` — see its docs.
+    fn verify_receipt(
+        &self,
+        image_id_or_verifier_key: &[u8],
+        public_inputs: &[Vec<u8>],
+    ) -> Result<bool>;
+}
+
+/// Fail-closed default [`RiscZeroReceiptVerifier`]: refuses every receipt.
+///
+/// This is the only [`RiscZeroReceiptVerifier`] implementation in this
+/// crate today. It exists so [`ProofEnvelope::verify`] has a concrete seam
+/// to call for `BackendId::RiscZero` rather than inlining the refusal —
+/// swapping this type out for one backed by the audited `risc0-zkvm`
+/// verifier (once external cryptographic review lands) is the intended,
+/// localized future change. It must never be changed to return `Ok(true)`
+/// without that review having actually happened; doing so would be exactly
+/// the false soundness claim ratified decision D1 and the VCG-001b
+/// anti-overclaim regression locks (`tests/riscz_verifier_scaffold.rs`)
+/// exist to prevent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FailClosedRiscZeroVerifier;
+
+impl RiscZeroReceiptVerifier for FailClosedRiscZeroVerifier {
+    fn verify_receipt(
+        &self,
+        _image_id_or_verifier_key: &[u8],
+        _public_inputs: &[Vec<u8>],
+    ) -> Result<bool> {
+        Err(ProofError::VerificationFailed(
+            "BackendId::RiscZero verifier is a pending-review scaffold: no external \
+             cryptographic review of the risc0 verify path has landed yet, so this refuses \
+             closed rather than trust an unaudited verifier. See \
+             RiscZeroReceiptVerifier for exactly where the audited risc0 verify call plugs \
+             in once review lands."
+                .to_string(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,16 +361,15 @@ impl ProofEnvelope {
     /// Verifies the envelope's named backend is both registered and, if
     /// unaudited, explicitly opted into.
     ///
-    /// This lane (VCG-001a) does not implement per-backend proof
-    /// verification logic: no production backend exists yet (VCG-001b,
-    /// ratified decision D1, out of scope here), and this method does not
-    /// wire up or bypass the crate's existing unaudited blake3 stand-in
-    /// verification in `snark.rs` / `stark.rs` / `zkml.rs` /
-    /// `verifier::verify_any`. Fail-closed: **every** backend currently
-    /// registered returns a typed error here — there is no verifier wired
-    /// for any backend at this stage. This is a deliberate success-shaped
-    /// surface trap avoidance: `verify()` must never report `Ok(true)`
-    /// unless it actually verified something.
+    /// No backend has a working, externally-reviewed verifier wired yet:
+    /// the unaudited blake3 stand-in is feature-gated and still a fail-closed
+    /// stub even when opted into (VCG-001a), and the RISC Zero seam
+    /// (VCG-001b, ratified decision D1) is wired but pending external
+    /// cryptographic review (see [`RiscZeroReceiptVerifier`]). Fail-closed:
+    /// **every** backend currently registered returns a typed error here —
+    /// there is no verifier wired for any backend at this stage. This is a
+    /// deliberate success-shaped surface trap avoidance: `verify()` must
+    /// never report `Ok(true)` unless it actually verified something.
     ///
     /// Behavior:
     /// - Unknown/unregistered backend id → `Err(ProofError::InvalidProofFormat)`
@@ -271,8 +381,14 @@ impl ProofEnvelope {
     ///   with `Err(ProofError::VerificationFailed)` because no verifier is
     ///   wired for this backend yet — construction/wrapping of an envelope
     ///   for this backend is feature-gated as above, but *verification* is
-    ///   not implemented at all in VCG-001a. Real verification arrives with
-    ///   VCG-001b.
+    ///   not implemented at all.
+    /// - [`BackendId::RiscZero`] → always refuses with
+    ///   `Err(ProofError::VerificationFailed)` via
+    ///   [`FailClosedRiscZeroVerifier`], independent of the
+    ///   `unaudited-pedagogical-proofs` feature flag (that flag only gates
+    ///   this crate's own blake3 stand-in, not the RiscZero seam). The
+    ///   refusal reason names pending external review, not a missing
+    ///   feature opt-in.
     pub fn verify(&self) -> Result<bool> {
         self.validate_backend()?;
 
@@ -290,6 +406,18 @@ impl ProofEnvelope {
                      VCG-001b lands real per-backend verification",
                     self.backend_id
                 )))
+            }
+            BackendId::RiscZero => {
+                // The RiscZero seam's refusal is NOT gated by
+                // `unaudited-pedagogical-proofs` — that feature concerns
+                // only this crate's own pedagogical blake3 stand-in.
+                // FailClosedRiscZeroVerifier always refuses, regardless of
+                // feature state, because no external cryptographic review
+                // of the risc0 verify path has landed yet (ratified
+                // decision D1). See RiscZeroReceiptVerifier for exactly
+                // where the audited verify call plugs in once review lands.
+                FailClosedRiscZeroVerifier
+                    .verify_receipt(&self.verifier_key_or_image_id, &self.public_inputs)
             }
             BackendId::Unknown(_) => unreachable!(
                 "validate_backend() above must have already refused an unregistered backend id"

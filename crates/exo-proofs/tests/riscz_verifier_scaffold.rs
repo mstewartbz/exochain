@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 //! RED-stage tests for lane VCG-001b: an honest, fail-closed RISC Zero
 //! verifier-integration *scaffold*.
