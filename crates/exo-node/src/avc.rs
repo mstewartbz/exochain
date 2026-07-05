@@ -2774,7 +2774,7 @@ async fn handle_revoke(
 /// 1. The chain's root must be this node's own `validator_did`.
 /// 2. `state.authority` — this node's own `exo-authority` DelegationRegistry
 ///    (the single authority species per D3) — must have an actively granted
-///    chain from that root to the caller's DID (`find_chain`). A
+///    chain from that root to the issuer DID being registered (`find_chain`). A
 ///    syntactically valid, self-signed chain the caller fabricates out of
 ///    band, without ever having been granted a delegation by this node,
 ///    is rejected here even if its signatures independently verify.
@@ -2902,6 +2902,12 @@ async fn handle_register_issuer(
                 .into(),
         ));
     };
+    if chain.leaf() != Some(&issuer_did) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain leaf must match issuer_did".into(),
+        ));
+    }
     verify_issuer_registration_authority(&state, chain)?;
 
     if payload.granted_permissions.is_empty() {
@@ -7804,9 +7810,8 @@ mod avc_issuer_conformance_tests {
         let issuer_kp = new_issuer_keypair();
         let validator_kp =
             KeyPair::from_secret_bytes(LOCAL_VALIDATOR_SEED).expect("valid validator seed");
-        let operator_did = Did::new("did:exo:runtime-usable-operator").expect("valid DID");
 
-        // Seed trust for the operator's own delegator key resolution, exactly
+        // Seed trust for the issuer-registration delegator key resolution, exactly
         // as `issuer_registration_with_genuine_delegated_authority_succeeds`
         // does: the chain-verification resolver in
         // `verify_issuer_registration_authority` resolves each link's
@@ -7818,13 +7823,13 @@ mod avc_issuer_conformance_tests {
             .put_public_key(validator_did(), validator_kp.public);
 
         // Grant real, signed, auditable authority from this node's validator
-        // to the operator DID — the D3-compliant way authority comes to
+        // to the issuer DID — the D3-compliant way authority comes to
         // exist, as opposed to a bare bearer token.
         let now = Timestamp::new(1_000, 0);
         let expires = Timestamp::new(9_000_000, 0);
         state
             .grant_issuer_registration_authority(
-                operator_did.clone(),
+                issuer_did.clone(),
                 DelegateeKind::Human,
                 &validator_kp.public,
                 expires,
@@ -7833,7 +7838,7 @@ mod avc_issuer_conformance_tests {
             )
             .expect("grant issuer-registration authority");
         let chain = state
-            .find_delegated_issuer_registration_chain(&operator_did)
+            .find_delegated_issuer_registration_chain(&issuer_did)
             .expect("delegated issuer-registration chain must be resolvable after granting");
 
         // Register the new issuer's DID + public key through the runtime
@@ -8118,15 +8123,10 @@ mod avc_issuer_registration_authority_tests {
     }
 
     const VALIDATOR_SEED: [u8; 32] = [0x33; 32];
-    const OPERATOR_SEED: [u8; 32] = [0x55; 32];
     const NEW_ISSUER_SEED: [u8; 32] = [0x77; 32];
 
     fn validator_keypair() -> KeyPair {
         KeyPair::from_secret_bytes(VALIDATOR_SEED).expect("valid validator seed")
-    }
-
-    fn operator_keypair() -> KeyPair {
-        KeyPair::from_secret_bytes(OPERATOR_SEED).expect("valid operator seed")
     }
 
     fn new_issuer_keypair() -> KeyPair {
@@ -8208,7 +8208,6 @@ mod avc_issuer_registration_authority_tests {
     async fn issuer_registration_with_genuine_delegated_authority_succeeds() {
         let state = fresh_state();
         let validator_kp = validator_keypair();
-        let operator_kp = operator_keypair();
         let issuer_did = new_issuer_did();
         let issuer_kp = new_issuer_keypair();
 
@@ -8231,7 +8230,7 @@ mod avc_issuer_registration_authority_tests {
         let expires = Timestamp::new(9_000_000, 0);
         state
             .grant_issuer_registration_authority(
-                operator_did(),
+                issuer_did.clone(),
                 DelegateeKind::Human,
                 &validator_kp.public,
                 expires,
@@ -8241,7 +8240,7 @@ mod avc_issuer_registration_authority_tests {
             .expect("grant issuer-registration authority");
 
         let chain = state
-            .find_delegated_issuer_registration_chain(&operator_did())
+            .find_delegated_issuer_registration_chain(&issuer_did)
             .expect("delegated issuer-registration chain must be resolvable after granting");
 
         let register_body = serde_json::json!({
@@ -8271,8 +8270,6 @@ mod avc_issuer_registration_authority_tests {
                 String::from_utf8_lossy(&body)
             );
         }
-
-        let _ = operator_kp; // retained for symmetry with real operator key material
 
         let credential = issue_avc(draft_for_issuer(issuer_did.clone()), |bytes| {
             issuer_kp.sign(bytes)
@@ -8339,7 +8336,7 @@ mod avc_issuer_registration_authority_tests {
         let expires = Timestamp::new(9_000_000, 0);
         state
             .grant_issuer_registration_authority(
-                operator_did(),
+                issuer_did.clone(),
                 DelegateeKind::Human,
                 &validator_kp.public,
                 expires,
@@ -8348,7 +8345,7 @@ mod avc_issuer_registration_authority_tests {
             )
             .expect("grant issuer-registration authority");
         let chain = state
-            .find_delegated_issuer_registration_chain(&operator_did())
+            .find_delegated_issuer_registration_chain(&issuer_did)
             .expect("delegated issuer-registration chain must be exportable");
 
         let register_body = serde_json::json!({
@@ -8480,7 +8477,7 @@ mod avc_issuer_registration_authority_tests {
     #[tokio::test]
     async fn issuer_registration_rejects_empty_permission_cap() {
         let (state, chain) = state_with_granted_operator();
-        let issuer_did = new_issuer_did();
+        let issuer_did = operator_did();
         let issuer_kp = new_issuer_keypair();
         let register_body = serde_json::json!({
             "issuer_did": issuer_did.to_string(),
@@ -8514,9 +8511,45 @@ mod avc_issuer_registration_authority_tests {
     }
 
     #[tokio::test]
-    async fn issuer_registration_applies_permission_cap() {
+    async fn issuer_registration_rejects_authority_chain_leaf_that_differs_from_issuer_did() {
         let (state, chain) = state_with_granted_operator();
         let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+            "granted_permissions": ["Read", "Write"],
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_public_key(&issuer_did),
+            None,
+            "a rejected issuer/authority leaf mismatch must not register the key"
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_applies_permission_cap() {
+        let (state, chain) = state_with_granted_operator();
+        let issuer_did = operator_did();
         let issuer_kp = new_issuer_keypair();
         let register_body = serde_json::json!({
             "issuer_did": issuer_did.to_string(),
