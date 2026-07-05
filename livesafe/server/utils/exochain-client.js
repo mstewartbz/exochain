@@ -272,8 +272,46 @@ function publicAuthorizationTransportErrorState(error) {
   return 'unavailable';
 }
 
+function isByteArrayOfLength(value, expectedLength) {
+  return (
+    Array.isArray(value) &&
+    value.length === expectedLength &&
+    value.every(
+      (byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255,
+    )
+  );
+}
+
+function bytesToLowerHex(bytes) {
+  return bytes
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function normalizeHash256(value) {
+  if (!isByteArrayOfLength(value, 32)) {
+    return null;
+  }
+
+  return `sha256:${bytesToLowerHex(value)}`;
+}
+
 function normalizePublicAuthorizationSignature(signature) {
-  return isNonEmptyString(signature) ? signature.trim() : null;
+  if (!isObjectRecord(signature)) {
+    return null;
+  }
+
+  const keys = Object.keys(signature);
+  if (keys.length !== 1 || keys[0] !== 'Ed25519') {
+    return null;
+  }
+
+  const bytes = signature.Ed25519;
+  if (!isByteArrayOfLength(bytes, 64)) {
+    return null;
+  }
+
+  return `ed25519:${bytesToLowerHex(bytes)}`;
 }
 
 function publicAuthorizationRevocationState(revocationStatus) {
@@ -281,7 +319,11 @@ function publicAuthorizationRevocationState(revocationStatus) {
     return 'rejected';
   }
 
-  const normalized = revocationStatus.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const normalized = revocationStatus
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .toLowerCase();
 
   if (normalized === 'revoked') {
     return 'revoked';
@@ -297,6 +339,10 @@ function publicAuthorizationRevocationState(revocationStatus) {
   }
 
   return 'rejected';
+}
+
+function isValidSchemaVersion(value) {
+  return Number.isInteger(value) && value > 0 && value <= 65535;
 }
 
 function adaptCorePublicAdapterOutputAuthorizationEnvelope(
@@ -329,8 +375,8 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
   }
 
   if (
-    !isNonEmptyString(envelope.schema_version) ||
-    !isNonEmptyString(proof.schema_version)
+    !isValidSchemaVersion(envelope.schema_version) ||
+    !isValidSchemaVersion(proof.schema_version)
   ) {
     return { state: 'rejected', value: null };
   }
@@ -344,7 +390,23 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
 
   const generatedAt = coreTimestampToIso(proof.issued_at);
   const expiresAt = coreTimestampToIso(proof.expires_at);
+  const evidenceHash = normalizeHash256(proof.evidence_hash);
+  const actionCommitmentHash = normalizeHash256(proof.action_commitment_hash);
+  const idempotencyKeyHash = normalizeHash256(proof.idempotency_key_hash);
+  const proofHash = normalizeHash256(proof.proof_hash);
   const signature = normalizePublicAuthorizationSignature(proof.signature);
+  if (
+    !evidenceHash ||
+    !actionCommitmentHash ||
+    !idempotencyKeyHash ||
+    !proofHash ||
+    !signature ||
+    !isNonEmptyString(proof.credential_id) ||
+    !isNonEmptyString(proof.receipt_id) ||
+    !isNonEmptyString(proof.signer_did)
+  ) {
+    return { state: 'rejected', value: null };
+  }
 
   return {
     state: 'permit',
@@ -353,12 +415,10 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
       subject: proof.subject,
       audience: proof.audience,
       claims: [...ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS],
-      evidence_hash: proof.evidence_hash,
+      evidence_hash: evidenceHash,
       receipt_id: proof.receipt_id,
-      proof_id: proof.proof_hash,
-      proof_ref: isNonEmptyString(proof.proof_hash)
-        ? `exochain-avc:${proof.proof_hash}`
-        : null,
+      proof_id: proofHash,
+      proof_ref: `exochain-avc:${proofHash}`,
       generated_at: generatedAt,
       valid_from: generatedAt,
       expires_at: expiresAt,

@@ -2,6 +2,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { ExochainClient } = require("../server/utils/exochain-client.js");
 
+function repeatedByte(byte: number, length: number) {
+  return Array.from({ length }, () => byte);
+}
+
+function repeatedHex(byte: number, length: number) {
+  return byte.toString(16).padStart(2, "0").repeat(length);
+}
+
+const EVIDENCE_HASH_BYTES = repeatedByte(0xbb, 32);
+const PROOF_HASH_BYTES = repeatedByte(0xcc, 32);
+const ACTION_COMMITMENT_HASH_BYTES = repeatedByte(0xdd, 32);
+const IDEMPOTENCY_KEY_HASH_BYTES = repeatedByte(0xee, 32);
+const ED25519_SIGNATURE_BYTES = repeatedByte(0xaa, 64);
+const EVIDENCE_HASH_HEX = repeatedHex(0xbb, 32);
+const PROOF_HASH_HEX = repeatedHex(0xcc, 32);
+const ED25519_SIGNATURE_HEX = repeatedHex(0xaa, 64);
+
 const PUBLIC_ADAPTER_AUTHORIZATION_DTO = {
   schema: "livesafe.public_adapter_output_authorization.v1",
   subject: "livesafe.ai",
@@ -33,8 +50,7 @@ const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
     "secret-public-adapter-bearer",
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID:
     "credential:livesafe-public-adapter-output",
-  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH:
-    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH: `sha256:${EVIDENCE_HASH_HEX}`,
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY:
     "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT: "2026-07-05T12:05:00.000Z",
@@ -42,21 +58,18 @@ const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
 };
 
 const PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE = {
-  schema_version: "1",
+  schema_version: 1,
   domain: "livesafe.public_adapter_output_authorization.v1",
   proof: {
-    schema_version: "1",
+    schema_version: 1,
     domain: "livesafe.public_adapter_output_authorization.v1",
     subject: "livesafe.ai",
     audience: "https://livesafe.ai/api/trust/status",
-    evidence_hash:
-      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    evidence_hash: EVIDENCE_HASH_BYTES,
     credential_id: "credential:livesafe-public-adapter-output",
     receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
-    action_commitment_hash:
-      "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    idempotency_key_hash:
-      "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    action_commitment_hash: ACTION_COMMITMENT_HASH_BYTES,
+    idempotency_key_hash: IDEMPOTENCY_KEY_HASH_BYTES,
     issued_at: {
       physical_ms: Date.parse("2026-07-05T11:59:00.000Z"),
       logical: 3,
@@ -65,12 +78,12 @@ const PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE = {
       physical_ms: Date.parse("2026-07-05T12:05:00.000Z"),
       logical: 0,
     },
-    revocation_status: "active",
+    revocation_status: "NotRevoked",
     signer_did: "did:exo:livesafe:node",
-    proof_hash:
-      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    signature:
-      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    proof_hash: PROOF_HASH_BYTES,
+    signature: {
+      Ed25519: ED25519_SIGNATURE_BYTES,
+    },
   },
 };
 
@@ -83,22 +96,28 @@ const PUBLIC_ADAPTER_AUTHORIZATION_DTO_FROM_RUST = {
     "exochain_production_evidence_verified",
     "livesafe_runtime_adapter_verified",
   ],
-  evidence_hash:
-    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  evidence_hash: `sha256:${EVIDENCE_HASH_HEX}`,
   receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
-  proof_id:
-    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  proof_ref:
-    "exochain-avc:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  proof_id: `sha256:${PROOF_HASH_HEX}`,
+  proof_ref: `exochain-avc:sha256:${PROOF_HASH_HEX}`,
   generated_at: "2026-07-05T11:59:00.000Z",
   valid_from: "2026-07-05T11:59:00.000Z",
   expires_at: "2026-07-05T12:05:00.000Z",
   proof: {
     type: "ed25519-public-adapter-output-authorization",
-    signature:
-      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    signature: `ed25519:${ED25519_SIGNATURE_HEX}`,
   },
 };
+
+const PUBLIC_ADAPTER_AUTHORIZATION_STRING_ONLY_RUST_LIKE_ENVELOPE = rustCoreEnvelope({
+  proof: {
+    evidence_hash: `sha256:${EVIDENCE_HASH_HEX}`,
+    action_commitment_hash: `sha256:${repeatedHex(0xdd, 32)}`,
+    idempotency_key_hash: `sha256:${repeatedHex(0xee, 32)}`,
+    proof_hash: `sha256:${PROOF_HASH_HEX}`,
+    signature: `ed25519:${ED25519_SIGNATURE_HEX}`,
+  },
+});
 
 const PUBLIC_ADAPTER_AUTHORIZATION_LEGACY_FAKE_ENVELOPE = {
   envelope_schema:
@@ -751,6 +770,11 @@ describe("EXOCHAIN client timestamp preservation", () => {
       expectedState: "rejected",
     },
     {
+      label: "string-only Rust-like hash and signature fixture",
+      envelope: PUBLIC_ADAPTER_AUTHORIZATION_STRING_ONLY_RUST_LIKE_ENVELOPE,
+      expectedState: "rejected",
+    },
+    {
       label: "missing top-level domain",
       envelope: rustCoreEnvelope({ envelope: { domain: "" } }),
       expectedState: "rejected",
@@ -785,9 +809,50 @@ describe("EXOCHAIN client timestamp preservation", () => {
       label: "evidence hash mismatch",
       envelope: rustCoreEnvelope({
         proof: {
-          evidence_hash:
-            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          evidence_hash: repeatedByte(0xff, 32),
         },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence_hash not array",
+      envelope: rustCoreEnvelope({
+        proof: { evidence_hash: `sha256:${EVIDENCE_HASH_HEX}` },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence_hash wrong length",
+      envelope: rustCoreEnvelope({
+        proof: { evidence_hash: repeatedByte(0xbb, 31) },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence_hash non-integer byte",
+      envelope: rustCoreEnvelope({
+        proof: { evidence_hash: [...repeatedByte(0xbb, 31), 1.5] },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence_hash out-of-range byte",
+      envelope: rustCoreEnvelope({
+        proof: { evidence_hash: [...repeatedByte(0xbb, 31), 256] },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence_hash negative byte",
+      envelope: rustCoreEnvelope({
+        proof: { evidence_hash: [...repeatedByte(0xbb, 31), -1] },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "proof_hash wrong length",
+      envelope: rustCoreEnvelope({
+        proof: { proof_hash: repeatedByte(0xcc, 31) },
       }),
       expectedState: "rejected",
     },
@@ -833,9 +898,51 @@ describe("EXOCHAIN client timestamp preservation", () => {
       expectedState: "rejected",
     },
     {
-      label: "object signature shape",
+      label: "signature Empty variant",
       envelope: rustCoreEnvelope({
-        proof: { signature: { bytes: [1, 2, 3] } },
+        proof: { signature: { Empty: null } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "signature PostQuantum variant",
+      envelope: rustCoreEnvelope({
+        proof: { signature: { PostQuantum: repeatedByte(0xaa, 64) } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "signature Hybrid variant",
+      envelope: rustCoreEnvelope({
+        proof: {
+          signature: {
+            Hybrid: {
+              ed25519: repeatedByte(0xaa, 64),
+              post_quantum: repeatedByte(0xbb, 64),
+            },
+          },
+        },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "signature wrong Ed25519 length",
+      envelope: rustCoreEnvelope({
+        proof: { signature: { Ed25519: repeatedByte(0xaa, 63) } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "signature non-integer Ed25519 byte",
+      envelope: rustCoreEnvelope({
+        proof: { signature: { Ed25519: [...repeatedByte(0xaa, 63), 1.5] } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "signature out-of-range Ed25519 byte",
+      envelope: rustCoreEnvelope({
+        proof: { signature: { Ed25519: [...repeatedByte(0xaa, 63), 256] } },
       }),
       expectedState: "rejected",
     },
