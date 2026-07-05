@@ -41,6 +41,14 @@ on:
         description: "Commit SHA to deploy; defaults to the workflow SHA"
         required: false
         type: string
+      expected_public_claims_allowed:
+        description: "Expected public claims state for staging/production smoke"
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -94,6 +102,7 @@ jobs:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
       TARGET_ENVIRONMENT: staging
       TARGET_ENVIRONMENT_ID: a223bc12-fbe4-430f-abce-8e3ee7c9abd3
+      LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED: ${{ inputs.expected_public_claims_allowed || 'false' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -122,6 +131,7 @@ jobs:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
       TARGET_ENVIRONMENT: production
       TARGET_ENVIRONMENT_ID: 1e5153e1-15f4-4447-bf7c-029af33927fb
+      LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED: ${{ inputs.expected_public_claims_allowed || 'false' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

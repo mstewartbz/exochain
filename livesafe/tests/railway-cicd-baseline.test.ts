@@ -46,6 +46,17 @@ function expectRailwayAuthSecret(
   );
 }
 
+function expectPromotionSmokePublicClaimsEnv(workflow: string, jobId: string): void {
+  const job = readWorkflowJob(workflow, jobId);
+
+  expect(job, `${jobId} should pass expected public claims mode to smoke`).toContain(
+    "LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED: ${{ inputs.expected_public_claims_allowed || 'false' }}",
+  );
+  expect(job, `${jobId} should run the smoke script for the selected target`).toContain(
+    'scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"',
+  );
+}
+
 describe("LiveSafe Railway CI/CD baseline", () => {
   it("declares the ARMORCLOUD LiveSafe project environments and service names without secrets", () => {
     const manifest = JSON.parse(
@@ -142,6 +153,24 @@ describe("LiveSafe Railway CI/CD baseline", () => {
     expect(workflow).toContain(
       'scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"',
     );
+  });
+
+  it("threads the expected public-claims dispatch choice into staging and production smoke only", () => {
+    const workflow = readRepoFile(".github/workflows/livesafe-railway-deploy.yml");
+    const developmentJob = readWorkflowJob(workflow, "deploy-development");
+
+    expect(workflow).toContain("expected_public_claims_allowed:");
+    expect(workflow).toContain(
+      'description: "Expected public claims state for staging/production smoke"',
+    );
+    expect(workflow).toContain("type: choice");
+    expect(workflow).toContain('default: "false"');
+    expect(workflow).toContain('          - "false"');
+    expect(workflow).toContain('          - "true"');
+    expectPromotionSmokePublicClaimsEnv(workflow, "deploy-staging");
+    expectPromotionSmokePublicClaimsEnv(workflow, "deploy-production");
+    expect(developmentJob).toContain('scripts/livesafe-railway-smoke.sh "development"');
+    expect(developmentJob).not.toContain("LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED");
   });
 
   it("provides a bounded smoke probe script that never prints Railway variables", () => {
