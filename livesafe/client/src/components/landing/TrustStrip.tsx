@@ -14,6 +14,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  getLandingPublicTrustDisplayCopy,
+  type PublicTrustRouteContract,
+} from './publicTrustDisplayCopy';
+
 /** Small hex-node glyph for the EXOCHAIN item. */
 function HexNode() {
   return (
@@ -35,14 +40,13 @@ function HexNode() {
   );
 }
 
-const ITEMS: string[] = [
-  'Consent-gated access by design',
-  'did:exo identity, derived on your device by design',
-  'X25519 encryption envelope (spec)',
-  'Apache-2.0 open architecture',
-];
+interface TrustStripProps {
+  trustStatus?: PublicTrustRouteContract | null;
+}
 
-export default function TrustStrip() {
+export default function TrustStrip({ trustStatus = null }: TrustStripProps) {
+  const copy = getLandingPublicTrustDisplayCopy(trustStatus);
+
   return (
     <section className="bg-white/[0.02] border-y border-white/[0.06] py-6">
       <div className="max-w-6xl mx-auto px-6 md:px-8">
@@ -50,11 +54,12 @@ export default function TrustStrip() {
           <span className="flex items-center gap-2 text-gray-300">
             <HexNode />
             <span>
-              <span className="font-medium">Built on the EXOCHAIN model</span>
-              {' — constitutional trust fabric'}
+              <span className="font-medium">{copy.trustStripLead}</span>
+              {' - '}
+              {copy.trustStripDetail}
             </span>
           </span>
-          {ITEMS.map((item) => (
+          {copy.trustStripItems.map((item) => (
             <span key={item}>{item}</span>
           ))}
         </div>
