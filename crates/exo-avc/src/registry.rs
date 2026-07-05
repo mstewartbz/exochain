@@ -163,6 +163,15 @@ impl InMemoryAvcRegistry {
         Self::default()
     }
 
+    /// Resolve a receipt-validator public key without making validator keys
+    /// general AVC issuer keys. This is intentionally separate from
+    /// [`AvcRegistryRead::resolve_public_key`], which must continue to omit
+    /// validator-only keys from ordinary credential issuer resolution.
+    #[must_use]
+    pub fn resolve_receipt_validator_public_key(&self, did: &Did) -> Option<PublicKey> {
+        self.receipt_validator_public_keys.get(did).copied()
+    }
+
     /// Export the durable portion of the registry.
     #[must_use]
     pub fn durable_state(&self) -> AvcRegistryDurableState {
