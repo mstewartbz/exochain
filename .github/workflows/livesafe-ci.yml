@@ -29,6 +29,12 @@
 name: LiveSafe CI
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to verify; defaults to the workflow SHA"
+        required: false
+        type: string
   push:
     paths:
       - 'livesafe/**'
@@ -37,6 +43,9 @@ on:
     paths:
       - 'livesafe/**'
       - '.github/workflows/livesafe-ci.yml'
+
+permissions:
+  contents: read
 
 defaults:
   run:
@@ -48,6 +57,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
@@ -67,3 +78,6 @@ jobs:
         run: |
           npm --prefix responder ci
           npm --prefix responder run build
+      - name: Build LiveSafe Docker image
+        working-directory: .
+        run: docker build -f livesafe/Dockerfile livesafe
