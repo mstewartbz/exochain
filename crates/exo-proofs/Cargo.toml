@@ -49,6 +49,17 @@ blake3 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 ciborium = { workspace = true }
+# Verifier-only vendoring of RISC Zero (VCG-001b/c, ratified decision D1).
+# default-features = false is MANDATORY: risc0-zkvm's default features pull
+# in the full prover client + Bonsai remote-proving stack, neither of which
+# this crate ever needs -- EXOCHAIN proving is server-side-only elsewhere and
+# this crate is verifier-only. "std" is the minimal feature that keeps
+# Receipt::verify's dependency graph (Groth16 verifying key material, seal
+# decoding) buildable off std. This crate deliberately does NOT depend on any
+# "prove"/"client"/"bonsai" feature -- pulling those in would reintroduce the
+# exact heavy prover surface (and its supply chain) this seam is designed to
+# avoid on the verify-only path.
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

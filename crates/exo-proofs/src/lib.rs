@@ -57,6 +57,7 @@
 pub mod circuit;
 pub mod envelope;
 pub mod error;
+pub mod riscz;
 pub mod snark;
 pub mod stark;
 pub mod verifier;

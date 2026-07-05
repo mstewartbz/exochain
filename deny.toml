@@ -52,6 +52,24 @@ ignore = [
     # paste is a proc-macro utility; the unmaintained status poses no runtime risk.
     # Upgrade tracked in APE-12 hygiene sprint.
     { id = "RUSTSEC-2024-0436", reason = "pre-existing transitive via async-graphql; proc-macro only; no runtime security impact" },
+
+    # derivative — no longer maintained proc-macro.
+    # Transitive via ark-crypto-primitives -> ark-groth16 -> risc0-groth16 ->
+    # risc0-zkvm (VCG-001c risc0 verifier-only vendoring, ratified decision D1).
+    # derivative is a compile-time-only derive-macro helper (generates trait
+    # impls at build time); it has no runtime surface and ships no code that
+    # executes against untrusted input. Upgrade tracked alongside the eventual
+    # arkworks/risc0 version bump.
+    { id = "RUSTSEC-2024-0388", reason = "derivative is an unmaintained compile-time-only proc-macro pulled transitively via ark-crypto-primitives -> ark-groth16 -> risc0-groth16 -> risc0-zkvm (verifier-only vendoring, VCG-001c); no runtime code path" },
+
+    # tracing-subscriber 0.2.25 — ANSI escape sequence injection in output
+    # formatting when logging untrusted input directly to a terminal.
+    # Transitive via risc0-zkvm's own dependency tree (arkworks-internal
+    # tracing instrumentation, e.g. ark-relations). EXOCHAIN does not use this
+    # tracing-subscriber version to format or log untrusted external input —
+    # it is an internal dependency of the vendored verifier crate graph, not
+    # a logging sink this workspace configures or writes to.
+    { id = "RUSTSEC-2025-0055", reason = "tracing-subscriber 0.2.25 ANSI-injection advisory concerns logging untrusted input to a terminal; pulled transitively via risc0-zkvm's arkworks-internal tracing instrumentation, not used by EXOCHAIN for untrusted-input logging" },
 ]
 
 # ---------------------------------------------------------------------------
