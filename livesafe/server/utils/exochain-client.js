@@ -19,6 +19,13 @@ const ALLOWED_AUDIT_RECEIPT_EVENT_TYPES = new Set([
 const EXOCHAIN_TIMEOUT_ERROR = 'EXOCHAIN_TIMEOUT';
 const EXOCHAIN_UNAVAILABLE_ERROR = 'EXOCHAIN_UNAVAILABLE';
 const EXOCHAIN_GATEWAY_REJECTED_ERROR = 'EXOCHAIN_GATEWAY_REJECTED';
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA =
+  'livesafe.public_adapter_output_authorization.v1';
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT = 'livesafe.ai';
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE =
+  'https://livesafe.ai/api/trust/status';
+const SHA256_EVIDENCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const PROOF_SIGNATURE_PATTERN = /^ed25519:[A-Za-z0-9+/_=-]{32,}$/;
 
 function isRequiredTransportIdentifier(value) {
   return (
@@ -86,6 +93,53 @@ function createTransportError(code) {
   return { data: null, errors: [{ message: code, code }] };
 }
 
+function createPublicAuthorizationDenied(state = 'rejected') {
+  return { state, value: null };
+}
+
+function publicAuthorizationErrorState(result) {
+  const code =
+    result?.errors && typeof result.errors[0]?.code === 'string'
+      ? result.errors[0].code
+      : '';
+
+  if (code === EXOCHAIN_TIMEOUT_ERROR) {
+    return 'timeout';
+  }
+
+  if (code === EXOCHAIN_UNAVAILABLE_ERROR) {
+    return 'unavailable';
+  }
+
+  return 'rejected';
+}
+
+function isPublicAdapterOutputAuthorizationDto(value, subject, audience) {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.schema === PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA &&
+    value.subject === subject &&
+    value.audience === audience &&
+    Array.isArray(value.claims) &&
+    value.claims.length > 0 &&
+    value.claims.every(isNonEmptyString) &&
+    SHA256_EVIDENCE_HASH_PATTERN.test(value.evidence_hash || '') &&
+    isNonEmptyString(value.receipt_id) &&
+    isNonEmptyString(value.proof_id) &&
+    isNonEmptyString(value.proof_ref) &&
+    isNonEmptyString(value.generated_at) &&
+    isNonEmptyString(value.valid_from) &&
+    isNonEmptyString(value.expires_at) &&
+    Boolean(value.proof) &&
+    typeof value.proof === 'object' &&
+    !Array.isArray(value.proof) &&
+    isNonEmptyString(value.proof.type) &&
+    PROOF_SIGNATURE_PATTERN.test(value.proof.signature || '')
+  );
+}
+
 class ExochainClient {
   constructor(gatewayUrl = EXOCHAIN_GATEWAY) {
     this.gatewayUrl = gatewayUrl;
@@ -105,7 +159,7 @@ class ExochainClient {
       }
       return await response.json();
     } catch (err) {
-      console.warn(`[EXOCHAIN] Gateway unreachable: ${err.message}`);
+      console.warn('[EXOCHAIN] Gateway unreachable: redacted transport failure');
       return createTransportError(
         isTimeoutLikeError(err) ? EXOCHAIN_TIMEOUT_ERROR : EXOCHAIN_UNAVAILABLE_ERROR,
       );
@@ -363,6 +417,65 @@ class ExochainClient {
     } catch (err) {
       console.warn(`[EXOCHAIN] getPaceStatus error: ${err.message}`);
       return [];
+    }
+  }
+
+  async getPublicAdapterOutputAuthorization({ subject, audience } = {}) {
+    if (
+      subject !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT ||
+      audience !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE
+    ) {
+      console.warn('[EXOCHAIN] public adapter-output authorization rejected malformed target before query');
+      return createPublicAuthorizationDenied();
+    }
+
+    try {
+      const result = await this.query('GetPublicAdapterOutputAuthorization', `
+        query GetPublicAdapterOutputAuthorization($input: PublicAdapterOutputAuthorizationInput!) {
+          livesafe_public_adapter_output_authorization(input: $input) {
+            schema
+            subject
+            audience
+            claims
+            evidence_hash
+            receipt_id
+            proof_id
+            proof_ref
+            generated_at
+            valid_from
+            expires_at
+            proof {
+              type
+              signature
+            }
+          }
+        }
+      `, {
+        input: {
+          subject,
+          audience,
+        },
+      });
+
+      if (result.errors) {
+        console.warn('[EXOCHAIN] public adapter-output authorization rejected by gateway');
+        return createPublicAuthorizationDenied(publicAuthorizationErrorState(result));
+      }
+
+      const authorization =
+        result.data?.livesafe_public_adapter_output_authorization;
+
+      if (!isPublicAdapterOutputAuthorizationDto(authorization, subject, audience)) {
+        console.warn('[EXOCHAIN] public adapter-output authorization response malformed');
+        return createPublicAuthorizationDenied();
+      }
+
+      return { state: 'permit', value: authorization };
+    } catch (err) {
+      console.warn('[EXOCHAIN] public adapter-output authorization transport failed');
+      return createPublicAuthorizationDenied(
+        isTimeoutLikeError(err) ? 'timeout' : 'unavailable',
+      );
     }
   }
 

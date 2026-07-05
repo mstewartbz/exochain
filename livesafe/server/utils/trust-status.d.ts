@@ -21,6 +21,7 @@ export interface TrustStatusPayloadOptions {
       | "anchorScan"
       | "anchorConsent"
       | "getPaceStatus"
+      | "getPublicAdapterOutputAuthorization"
     >;
     disablement_path: string;
     source_basis: string[];
@@ -72,6 +73,7 @@ export interface TrustStatusPayload {
     | "anchorScan"
     | "anchorConsent"
     | "getPaceStatus"
+    | "getPublicAdapterOutputAuthorization"
   >;
   adapter_disablement_path: string;
   exochain_production_evidence_state: "verified" | "blocked";
@@ -115,6 +117,23 @@ export function createTrustStatusPayload(
   options: TrustStatusPayloadOptions
 ): TrustStatusPayload;
 
+export function buildLiveTrustStatusOptions(
+  options: TrustStatusPayloadOptions & {
+    adapter?: {
+      getRuntimeStatus(): TrustStatusPayloadOptions["runtimeStatus"];
+      getPublicAdapterOutputAuthorization(options: {
+        currentAt: string;
+        returnDecision: true;
+      }): Promise<{
+        allowed: boolean;
+        responseState: string;
+        transportCalled: boolean;
+        value: unknown;
+      }>;
+    };
+  }
+): Promise<TrustStatusPayloadOptions>;
+
 export function sendTrustStatusResponse(
   req: unknown,
   res: {
@@ -124,3 +143,26 @@ export function sendTrustStatusResponse(
   },
   options: TrustStatusPayloadOptions
 ): unknown;
+
+export function sendLiveTrustStatusResponse(
+  req: unknown,
+  res: {
+    status(code: number): {
+      json(payload: TrustStatusPayload): unknown;
+    };
+  },
+  options: TrustStatusPayloadOptions & {
+    adapter?: {
+      getRuntimeStatus(): TrustStatusPayloadOptions["runtimeStatus"];
+      getPublicAdapterOutputAuthorization(options: {
+        currentAt: string;
+        returnDecision: true;
+      }): Promise<{
+        allowed: boolean;
+        responseState: string;
+        transportCalled: boolean;
+        value: unknown;
+      }>;
+    };
+  }
+): Promise<unknown>;

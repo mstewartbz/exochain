@@ -175,11 +175,68 @@ function createTrustStatusPayload({
   return payload;
 }
 
+function resolveGeneratedAt(generatedAt) {
+  return generatedAt ?? new Date().toISOString();
+}
+
+async function getPublicAdapterOutputAuthorizationDecision({
+  adapter,
+  currentAt,
+}) {
+  try {
+    return await adapter.getPublicAdapterOutputAuthorization({
+      currentAt,
+      returnDecision: true,
+    });
+  } catch {
+    return {
+      allowed: false,
+      responseState: "unavailable",
+      transportCalled: true,
+      value: null,
+    };
+  }
+}
+
+async function buildLiveTrustStatusOptions({
+  adapter = runtimeExochainAdapter,
+  exochainConnected,
+  version,
+  uptimeSeconds,
+  generatedAt,
+  productionTrustEvidence,
+}) {
+  const currentAt = resolveGeneratedAt(generatedAt);
+  const runtimeStatus = adapter.getRuntimeStatus();
+  const adapterOutputAuthorization =
+    await getPublicAdapterOutputAuthorizationDecision({
+      adapter,
+      currentAt,
+    });
+
+  return {
+    exochainConnected,
+    version,
+    uptimeSeconds,
+    generatedAt: currentAt,
+    runtimeStatus,
+    adapterOutputAuthorization,
+    productionTrustEvidence,
+  };
+}
+
 function sendTrustStatusResponse(_req, res, options) {
   return res.status(200).json(createTrustStatusPayload(options));
 }
 
+async function sendLiveTrustStatusResponse(_req, res, options) {
+  const payloadOptions = await buildLiveTrustStatusOptions(options);
+  return sendTrustStatusResponse(_req, res, payloadOptions);
+}
+
 module.exports = {
+  buildLiveTrustStatusOptions,
   createTrustStatusPayload,
+  sendLiveTrustStatusResponse,
   sendTrustStatusResponse
 };

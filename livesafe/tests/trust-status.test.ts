@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createTrustStatusPayload,
+  sendLiveTrustStatusResponse,
   sendTrustStatusResponse
 } from "../server/utils/trust-status.js";
+import type { TrustStatusPayloadOptions } from "../server/utils/trust-status.js";
+
+type RuntimeStatus = NonNullable<TrustStatusPayloadOptions["runtimeStatus"]>;
+type RuntimeOperations = NonNullable<RuntimeStatus["wrapped_operations"]>;
 
 const VERIFIED_PRODUCTION_TRUST_EVIDENCE = {
   evidence_state: "verified" as const,
@@ -311,7 +316,7 @@ describe("trust status API contract", () => {
         uptimeSeconds: 16,
         generatedAt: "2026-07-05T12:00:00.000Z",
         runtimeStatus: {
-          adapter_state: "verified",
+          adapter_state: "verified" as const,
           surface_classification: "core-runtime-adapter",
           public_claims_allowed: true,
           can_read_exochain_core_state: true,
@@ -406,5 +411,121 @@ describe("trust status API contract", () => {
         public_claims_allowed: false
       })
     );
+  });
+
+  it("live trust status responder requests proof-bearing adapter output with the generated timestamp before sending", async () => {
+    const currentAt = "2026-07-05T12:00:00.000Z";
+    const getPublicAdapterOutputAuthorization = vi.fn(async () => ({
+      ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+    }));
+    const adapter = {
+      getRuntimeStatus(): RuntimeStatus {
+        return {
+          adapter_state: "verified" as const,
+          surface_classification: "core-runtime-adapter" as const,
+          public_claims_allowed: true,
+          can_read_exochain_core_state: true,
+          can_write_exochain_core_state: true,
+          wrapped_operations: [
+            "getIdentity",
+            "registerIdentity",
+            "anchorAuditReceipt",
+            "anchorScan",
+            "anchorConsent",
+            "getPaceStatus",
+            "getPublicAdapterOutputAuthorization",
+          ] as RuntimeOperations,
+          disablement_path:
+            "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+          source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+        };
+      },
+      getPublicAdapterOutputAuthorization,
+    };
+    const json = vi.fn();
+    const response = {
+      status: vi.fn(() => ({ json })),
+    };
+
+    await sendLiveTrustStatusResponse({}, response, {
+      adapter,
+      exochainConnected: true,
+      version: "1.0.0",
+      uptimeSeconds: 16,
+      generatedAt: currentAt,
+      productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+    });
+
+    expect(getPublicAdapterOutputAuthorization).toHaveBeenCalledWith({
+      currentAt,
+      returnDecision: true,
+    });
+    expect(response.status).toHaveBeenCalledWith(200);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generated_at: currentAt,
+        public_claims_allowed: true,
+        state: "externally-verified",
+      }),
+    );
+  });
+
+  it("live trust status responder stays fail-closed when adapter authorization denies, times out, or is unavailable", async () => {
+    for (const responseState of ["deny", "timeout", "unavailable"] as const) {
+      const currentAt = "2026-07-05T12:00:00.000Z";
+      const adapter = {
+        getRuntimeStatus(): RuntimeStatus {
+          return {
+            adapter_state: "verified" as const,
+            surface_classification: "core-runtime-adapter" as const,
+            public_claims_allowed: true,
+            can_read_exochain_core_state: true,
+            can_write_exochain_core_state: true,
+            wrapped_operations: [
+              "getIdentity",
+              "registerIdentity",
+              "anchorAuditReceipt",
+              "anchorScan",
+              "anchorConsent",
+              "getPaceStatus",
+              "getPublicAdapterOutputAuthorization",
+            ] as RuntimeOperations,
+            disablement_path:
+              "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+            source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+          };
+        },
+        getPublicAdapterOutputAuthorization: vi.fn(async () => ({
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          allowed: false,
+          responseState,
+          value: null,
+        })),
+      };
+      const json = vi.fn();
+      const response = {
+        status: vi.fn(() => ({ json })),
+      };
+
+      await sendLiveTrustStatusResponse({}, response, {
+        adapter,
+        exochainConnected: true,
+        version: "1.0.0",
+        uptimeSeconds: 16,
+        generatedAt: currentAt,
+        productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+      });
+
+      expect(json, responseState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          generated_at: currentAt,
+          public_claims_allowed: false,
+          state: "not-verified",
+        }),
+      );
+      expect(JSON.stringify(json.mock.calls[0]?.[0]), responseState).not.toContain(
+        "signature",
+      );
+    }
   });
 });
