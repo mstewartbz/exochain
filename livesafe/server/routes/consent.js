@@ -584,8 +584,33 @@ router.get('/expiry-check', authMiddleware, async (req, res) => {
   }
 });
 
+// Auth middleware (subscriber OR provider) - accepts either token type so the
+// route below can apply per-role scoping instead of a single fixed role gate.
+function subscriberOrProviderAuthMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  try {
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const isSubscriber = decoded.user_type === 'subscriber' || decoded.role === 'subscriber';
+    const isProvider = decoded.user_type === 'provider';
+    if (!isSubscriber && !isProvider) {
+      return res.status(403).json({ error: 'Subscriber or provider account required' });
+    }
+    req.user = decoded;
+    req.authRole = isProvider ? 'provider' : 'subscriber';
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
 // GET /api/consent/:subscriberDid - Get consent events for subscriber (legacy)
-router.get('/:subscriberDid', async (req, res) => {
+// Feature: authorization boundary - a subscriber may only read their OWN consent
+// history; a provider may only read consent_events that name them as the provider.
+router.get('/:subscriberDid', subscriberOrProviderAuthMiddleware, async (req, res) => {
   try {
     const db = req.app.locals.db;
     const { subscriberDid } = req.params;
@@ -594,10 +619,26 @@ router.get('/:subscriberDid', async (req, res) => {
     if (subResult.rows.length === 0) {
       return res.status(404).json({ error: 'Subscriber not found' });
     }
+    const resolvedSubscriberId = subResult.rows[0].id;
 
+    if (req.authRole === 'subscriber') {
+      if (String(req.user.id) !== String(resolvedSubscriberId)) {
+        return res.status(403).json({ error: 'Cannot read consent history for another subscriber' });
+      }
+
+      const result = await db.query(
+        'SELECT * FROM consent_events WHERE subscriber_id = $1 ORDER BY granted_at DESC',
+        [resolvedSubscriberId]
+      );
+
+      return res.json(buildConsentCollectionResponse(result.rows));
+    }
+
+    // Provider: only consent_events that name this provider for this subscriber
+    const providerId = req.user.id;
     const result = await db.query(
-      'SELECT * FROM consent_events WHERE subscriber_id = $1 ORDER BY granted_at DESC',
-      [subResult.rows[0].id]
+      'SELECT * FROM consent_events WHERE subscriber_id = $1 AND provider_id = $2 ORDER BY granted_at DESC',
+      [resolvedSubscriberId, providerId]
     );
 
     res.json(buildConsentCollectionResponse(result.rows));
