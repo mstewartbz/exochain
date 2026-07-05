@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { ExochainClient } = require("../server/utils/exochain-client.js");
+const {
+  ExochainClient,
+  buildPublicAdapterOutputAuthorizationRequest,
+} = require("../server/utils/exochain-client.js");
 
 function repeatedByte(byte: number, length: number) {
   return Array.from({ length }, () => byte);
@@ -18,6 +21,8 @@ const IDEMPOTENCY_KEY_HASH_BYTES = repeatedByte(0xee, 32);
 const ED25519_SIGNATURE_BYTES = repeatedByte(0xaa, 64);
 const EVIDENCE_HASH_HEX = repeatedHex(0xbb, 32);
 const CREDENTIAL_ID_HEX = repeatedHex(0xbc, 32);
+const ALT_EVIDENCE_HASH_HEX = repeatedHex(0xab, 32);
+const ALT_CREDENTIAL_ID_HEX = repeatedHex(0xcd, 32);
 const PROOF_HASH_HEX = repeatedHex(0xcc, 32);
 const ED25519_SIGNATURE_HEX = repeatedHex(0xaa, 64);
 
@@ -55,7 +60,10 @@ const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH: `sha256:${EVIDENCE_HASH_HEX}`,
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY:
     "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_NAMESPACE:
+    "livesafe-public-adapter-output",
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT: "2026-07-05T12:05:00.000Z",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TTL_MS: "300000",
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS: "2500",
 };
 
@@ -211,6 +219,43 @@ function configurePublicAdapterAuthorizationEnv(
       process.env[key] = value;
     }
   }
+}
+
+function publicAuthorizationRequestBodies(fetch: ReturnType<typeof vi.fn>) {
+  return fetch.mock.calls.map(([, requestInit]) =>
+    JSON.parse((requestInit as { body: string }).body),
+  );
+}
+
+function mockPublicAuthorizationFetchForCurrentAts(currentAts: string[]) {
+  if (currentAts.length === 0) {
+    throw new Error("at least one public authorization timestamp is required");
+  }
+
+  let callIndex = 0;
+
+  return vi.fn(async () => {
+    const currentAt = currentAts[Math.min(callIndex, currentAts.length - 1)] as string;
+    callIndex += 1;
+    const physicalMs = Date.parse(currentAt);
+
+    return {
+      ok: true,
+      json: async () =>
+        rustCoreEnvelope({
+          proof: {
+            issued_at: {
+              physical_ms: physicalMs,
+              logical: 0,
+            },
+            expires_at: {
+              physical_ms: physicalMs + 300000,
+              logical: 0,
+            },
+          },
+        }),
+    };
+  });
 }
 
 describe("EXOCHAIN client timestamp preservation", () => {
@@ -657,12 +702,26 @@ describe("EXOCHAIN client timestamp preservation", () => {
       leaked: "secret",
     },
     {
-      label: "expires_at is not a strict timestamp",
+      label: "bearer token is missing",
       override: {
-        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT:
-          "not-a-timestamp-secret-expiry",
+        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER: "",
       },
-      leaked: "secret-expiry",
+      leaked: "secret-public-adapter-bearer",
+    },
+    {
+      label: "base URL is malformed",
+      override: {
+        EXOCHAIN_NODE_URL: "not-a-url-secret-host",
+        EXOCHAIN_NODE_AVC_URL: "",
+      },
+      leaked: "secret-host",
+    },
+    {
+      label: "ttl exceeds the evaluator freshness window",
+      override: {
+        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TTL_MS: "300001",
+      },
+      leaked: "secret-public-adapter-bearer",
     },
   ])("fails closed before REST transport when $label", async ({
     override,
@@ -684,6 +743,139 @@ describe("EXOCHAIN client timestamp preservation", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(JSON.stringify(warn.mock.calls)).not.toContain(leaked);
     expect(JSON.stringify(warn.mock.calls)).not.toContain(
+      "secret-public-adapter-bearer",
+    );
+  });
+
+  it("does not require static public adapter-output idempotency or expiry env to call EXOCHAIN", async () => {
+    configurePublicAdapterAuthorizationEnv({
+      EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY: "",
+      EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT: "",
+    });
+    const client = new ExochainClient("http://example.invalid/graphql");
+    const fetch = mockPublicAuthorizationFetchForCurrentAts([
+      "2026-07-05T12:00:00.000Z",
+    ]);
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+
+    expect(result.state).toBe("permit");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [requestBody] = publicAuthorizationRequestBodies(fetch);
+    expect(requestBody.idempotency_key).toMatch(
+      /^livesafe-public-adapter-output:sha256:[a-f0-9]{64}$/,
+    );
+    expect(requestBody.idempotency_key).not.toBe(
+      "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+    );
+    expect(requestBody.expires_at).toEqual({
+      physical_ms: Date.parse("2026-07-05T12:05:00.000Z"),
+      logical: 0,
+    });
+  });
+
+  it("rotates public adapter-output authorization request material when currentAt leaves the freshness window", async () => {
+    configurePublicAdapterAuthorizationEnv();
+    const client = new ExochainClient("http://example.invalid/graphql");
+    const fetch = mockPublicAuthorizationFetchForCurrentAts([
+      "2026-07-05T12:00:00.000Z",
+      "2026-07-05T12:06:00.000Z",
+    ]);
+    vi.stubGlobal("fetch", fetch);
+
+    await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+    await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:06:00.000Z",
+    });
+
+    const [firstRequest, secondRequest] = publicAuthorizationRequestBodies(fetch);
+    expect(firstRequest.idempotency_key).not.toBe(secondRequest.idempotency_key);
+    expect(firstRequest.idempotency_key).not.toBe(
+      "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+    );
+    expect(secondRequest.expires_at).toEqual({
+      physical_ms: Date.parse("2026-07-05T12:10:00.000Z"),
+      logical: 0,
+    });
+  });
+
+  it("binds public adapter-output request idempotency to target, credential, evidence, and stable current time window material", () => {
+    const baseRequest = {
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      credentialId: `sha256:${CREDENTIAL_ID_HEX}`,
+      credentialIdBytes: CREDENTIAL_ID_BYTES,
+      evidenceHash: `sha256:${EVIDENCE_HASH_HEX}`,
+      evidenceHashBytes: EVIDENCE_HASH_BYTES,
+      currentAt: "2026-07-05T12:00:00.000Z",
+      namespace: "livesafe-public-adapter-output",
+      ttlMs: 300000,
+    };
+
+    const firstRequest =
+      buildPublicAdapterOutputAuthorizationRequest(baseRequest);
+    const sameWindowRequest = buildPublicAdapterOutputAuthorizationRequest({
+      ...baseRequest,
+      currentAt: "2026-07-05T12:04:59.999Z",
+    });
+    const nextWindowRequest = buildPublicAdapterOutputAuthorizationRequest({
+      ...baseRequest,
+      currentAt: "2026-07-05T12:05:00.000Z",
+    });
+    const evidenceChangedRequest = buildPublicAdapterOutputAuthorizationRequest({
+      ...baseRequest,
+      evidenceHash: `sha256:${ALT_EVIDENCE_HASH_HEX}`,
+      evidenceHashBytes: repeatedByte(0xab, 32),
+    });
+    const credentialChangedRequest =
+      buildPublicAdapterOutputAuthorizationRequest({
+        ...baseRequest,
+        credentialId: `sha256:${ALT_CREDENTIAL_ID_HEX}`,
+        credentialIdBytes: repeatedByte(0xcd, 32),
+      });
+    const targetChangedRequest = buildPublicAdapterOutputAuthorizationRequest({
+      ...baseRequest,
+      audience: "https://livesafe.ai/api/health",
+    });
+
+    expect(firstRequest.idempotency_key).toMatch(
+      /^livesafe-public-adapter-output:sha256:[a-f0-9]{64}$/,
+    );
+    expect(sameWindowRequest.idempotency_key).toBe(
+      firstRequest.idempotency_key,
+    );
+    expect(sameWindowRequest.expires_at).toEqual(firstRequest.expires_at);
+    expect(nextWindowRequest.idempotency_key).not.toBe(
+      firstRequest.idempotency_key,
+    );
+    expect(nextWindowRequest.expires_at).not.toEqual(firstRequest.expires_at);
+    expect(nextWindowRequest.expires_at).toEqual({
+      physical_ms: Date.parse("2026-07-05T12:10:00.000Z"),
+      logical: 0,
+    });
+    expect(evidenceChangedRequest.idempotency_key).not.toBe(
+      firstRequest.idempotency_key,
+    );
+    expect(credentialChangedRequest.idempotency_key).not.toBe(
+      firstRequest.idempotency_key,
+    );
+    expect(targetChangedRequest.idempotency_key).not.toBe(
+      firstRequest.idempotency_key,
+    );
+    expect(firstRequest.idempotency_key).not.toContain(CREDENTIAL_ID_HEX);
+    expect(firstRequest.idempotency_key).not.toContain(EVIDENCE_HASH_HEX);
+    expect(firstRequest.idempotency_key).not.toContain(
       "secret-public-adapter-bearer",
     );
   });
@@ -731,7 +923,9 @@ describe("EXOCHAIN client timestamp preservation", () => {
       audience: "https://livesafe.ai/api/trust/status",
       credential_id: CREDENTIAL_ID_BYTES,
       evidence_hash: EVIDENCE_HASH_BYTES,
-      idempotency_key: "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+      idempotency_key: expect.stringMatching(
+        /^livesafe-public-adapter-output:sha256:[a-f0-9]{64}$/,
+      ),
       expires_at: {
         physical_ms: Date.parse("2026-07-05T12:05:00.000Z"),
         logical: 0,
