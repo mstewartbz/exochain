@@ -106,6 +106,7 @@
 pub mod credential;
 pub mod delegation;
 pub mod error;
+pub mod public_output_authorization;
 pub mod receipt;
 pub mod registry;
 pub mod revocation;
@@ -121,6 +122,21 @@ pub use credential::{
 };
 pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;
+pub use public_output_authorization::{
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+    LivesafePublicAdapterOutputAuthorizationDraft,
+    LivesafePublicAdapterOutputAuthorizationEnvelope,
+    LivesafePublicAdapterOutputAuthorizationProof,
+    LivesafePublicAdapterOutputAuthorizationRevocationStatus,
+    livesafe_public_adapter_output_authorization_action_commitment_hash,
+    livesafe_public_adapter_output_authorization_action_request,
+    livesafe_public_adapter_output_authorization_idempotency_hash,
+    mint_livesafe_public_adapter_output_authorization_proof,
+    validate_livesafe_public_adapter_output_authorization,
+    verify_livesafe_public_adapter_output_authorization_proof,
+};
 pub use receipt::{
     AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN, AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
     AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof,
@@ -151,6 +167,7 @@ pub const AVC_SIGNING_DOMAINS: &[&str] = &[
     AVC_ACTION_SIGNING_DOMAIN,
     AVC_CREDENTIAL_SIGNING_DOMAIN,
     AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
     AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN,
     AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
     AVC_RECEIPT_SIGNING_DOMAIN,
@@ -184,6 +201,7 @@ mod hygiene_tests {
             include_str!("delegation.rs"),
             include_str!("error.rs"),
             include_str!("lib.rs"),
+            include_str!("public_output_authorization.rs"),
             include_str!("receipt.rs"),
             include_str!("registry.rs"),
             include_str!("revocation.rs"),
@@ -213,6 +231,7 @@ mod hygiene_tests {
             include_str!("delegation.rs"),
             include_str!("error.rs"),
             include_str!("lib.rs"),
+            include_str!("public_output_authorization.rs"),
             include_str!("receipt.rs"),
             include_str!("registry.rs"),
             include_str!("revocation.rs"),
@@ -226,6 +245,359 @@ mod hygiene_tests {
                     "AVC production sources must not contain `{token}`"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod public_output_authorization_tests {
+    use exo_authority::permission::Permission;
+    use exo_core::{Did, Hash256, Timestamp, crypto::KeyPair};
+
+    use super::*;
+
+    const ISSUER_SEED: [u8; 32] = [0x11; 32];
+    const PROOF_SIGNER_SEED: [u8; 32] = [0x33; 32];
+
+    fn issuer_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(ISSUER_SEED).expect("valid issuer seed")
+    }
+
+    fn proof_signer_keypair() -> KeyPair {
+        KeyPair::from_secret_bytes(PROOF_SIGNER_SEED).expect("valid proof signer seed")
+    }
+
+    fn did(value: &str) -> Did {
+        Did::new(value).expect("valid DID")
+    }
+
+    fn ts(ms: u64) -> Timestamp {
+        Timestamp::new(ms, 0)
+    }
+
+    fn h256(byte: u8) -> Hash256 {
+        Hash256::from_bytes([byte; 32])
+    }
+
+    fn livesafe_draft() -> AvcDraft {
+        AvcDraft {
+            schema_version: AVC_SCHEMA_VERSION,
+            issuer_did: did("did:exo:livesafe-issuer"),
+            principal_did: did("did:exo:livesafe-issuer"),
+            subject_did: did("did:exo:livesafe-public-adapter"),
+            holder_did: None,
+            subject_kind: AvcSubjectKind::Service {
+                service_id: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT.into(),
+            },
+            created_at: ts(1_000_000),
+            expires_at: Some(ts(2_000_000)),
+            delegated_intent: DelegatedIntent {
+                intent_id: h256(0xA1),
+                purpose: "Authorize narrow LiveSafe public adapter output".into(),
+                allowed_objectives: vec!["publish-redacted-trust-status".into()],
+                prohibited_objectives: vec![],
+                autonomy_level: AutonomyLevel::ExecuteWithinBounds,
+                delegation_allowed: false,
+            },
+            authority_scope: AuthorityScope {
+                permissions: vec![Permission::Read],
+                tools: vec![LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN.into()],
+                data_classes: vec![DataClass::Public],
+                counterparties: vec![],
+                jurisdictions: vec!["US".into()],
+            },
+            constraints: AvcConstraints {
+                allowed_time_window: Some(TimeWindow {
+                    not_before: ts(1_000_000),
+                    not_after: ts(2_000_000),
+                }),
+                ..AvcConstraints::permissive()
+            },
+            authority_chain: None,
+            consent_refs: vec![],
+            policy_refs: vec![],
+            parent_avc_id: None,
+        }
+    }
+
+    fn issue_credential(mut draft: AvcDraft) -> AutonomousVolitionCredential {
+        let issuer = issuer_keypair();
+        if draft.issuer_did != did("did:exo:livesafe-issuer") {
+            draft.issuer_did = did("did:exo:livesafe-issuer");
+            draft.principal_did = did("did:exo:livesafe-issuer");
+        }
+        issue_avc(draft, |bytes| issuer.sign(bytes)).expect("valid LiveSafe AVC")
+    }
+
+    fn registry_with_issuer(grant: Option<Vec<Permission>>) -> InMemoryAvcRegistry {
+        let mut registry = InMemoryAvcRegistry::new();
+        registry.put_public_key(did("did:exo:livesafe-issuer"), issuer_keypair().public);
+        if let Some(granted_permissions) = grant {
+            registry
+                .put_issuer_permission_grant(did("did:exo:livesafe-issuer"), granted_permissions);
+        }
+        registry
+    }
+
+    fn draft_for(
+        credential: AutonomousVolitionCredential,
+    ) -> LivesafePublicAdapterOutputAuthorizationDraft {
+        let idempotency_key_hash =
+            livesafe_public_adapter_output_authorization_idempotency_hash("idem-live-1")
+                .expect("idempotency hash");
+        let evidence_hash = h256(0xE1);
+        let issued_at = ts(1_500_000);
+        let expires_at = ts(1_700_000);
+        let action_commitment_hash =
+            livesafe_public_adapter_output_authorization_action_commitment_hash(
+                &credential,
+                LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+                LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+                evidence_hash,
+                idempotency_key_hash,
+                &issued_at,
+                &expires_at,
+            )
+            .expect("action commitment");
+        LivesafePublicAdapterOutputAuthorizationDraft {
+            credential,
+            subject: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT.into(),
+            audience: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE.into(),
+            evidence_hash,
+            credential_id: None,
+            receipt_id: h256(0xC1),
+            action_commitment_hash,
+            idempotency_key_hash,
+            issued_at,
+            expires_at,
+            signer_did: did("did:exo:public-output-proof-signer"),
+        }
+    }
+
+    fn mint(
+        draft: LivesafePublicAdapterOutputAuthorizationDraft,
+        registry: &InMemoryAvcRegistry,
+    ) -> Result<LivesafePublicAdapterOutputAuthorizationEnvelope, AvcError> {
+        mint_livesafe_public_adapter_output_authorization_proof(draft, registry, |bytes| {
+            proof_signer_keypair().sign(bytes)
+        })
+    }
+
+    fn sign_unchecked(
+        draft: LivesafePublicAdapterOutputAuthorizationDraft,
+    ) -> Result<LivesafePublicAdapterOutputAuthorizationEnvelope, AvcError> {
+        crate::public_output_authorization::sign_livesafe_public_adapter_output_authorization_proof_unchecked(
+            draft,
+            |bytes| proof_signer_keypair().sign(bytes),
+        )
+    }
+
+    #[test]
+    fn public_output_authorization_denies_missing_issuer_grant() {
+        let credential = issue_credential(livesafe_draft());
+        let registry = registry_with_issuer(None);
+
+        let error = mint(draft_for(credential), &registry).expect_err("missing issuer grant");
+
+        assert!(error.to_string().contains("issuer grant"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_grant_without_narrow_permission() {
+        let credential = issue_credential(livesafe_draft());
+        let registry = registry_with_issuer(Some(vec![Permission::Write]));
+
+        let error = mint(draft_for(credential), &registry).expect_err("missing Read grant");
+
+        assert!(error.to_string().contains("Permission::Read"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_expired_credential() {
+        let mut draft = livesafe_draft();
+        draft.expires_at = Some(ts(1_400_000));
+        let credential = issue_credential(draft);
+        let registry = registry_with_issuer(Some(vec![Permission::Read]));
+
+        let error = mint(draft_for(credential), &registry).expect_err("expired credential");
+
+        assert!(error.to_string().contains("Expired"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_revoked_credential() {
+        let credential = issue_credential(livesafe_draft());
+        let credential_id = credential.id().expect("credential id");
+        let mut registry = registry_with_issuer(Some(vec![Permission::Read]));
+        registry
+            .put_credential(credential.clone())
+            .expect("stored credential");
+        let revocation = revoke_avc(
+            credential_id,
+            did("did:exo:livesafe-issuer"),
+            AvcRevocationReason::IssuerRevoked,
+            ts(1_450_000),
+            |bytes| issuer_keypair().sign(bytes),
+        )
+        .expect("signed revocation");
+        registry
+            .put_revocation(revocation)
+            .expect("stored revocation");
+
+        let error = mint(draft_for(credential), &registry).expect_err("revoked credential");
+
+        assert!(error.to_string().contains("Revoked"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_non_livesafe_service_subject() {
+        let mut draft = livesafe_draft();
+        draft.subject_kind = AvcSubjectKind::Service {
+            service_id: "example.invalid".into(),
+        };
+        let credential = issue_credential(draft);
+        let registry = registry_with_issuer(Some(vec![Permission::Read]));
+
+        let error = mint(draft_for(credential), &registry).expect_err("wrong service subject");
+
+        assert!(error.to_string().contains("livesafe.ai"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_wrong_audience() {
+        let credential = issue_credential(livesafe_draft());
+        let registry = registry_with_issuer(Some(vec![Permission::Read]));
+        let mut draft = draft_for(credential);
+        draft.audience = "https://example.invalid/trust/status".into();
+
+        let error = mint(draft, &registry).expect_err("wrong audience");
+
+        assert!(error.to_string().contains("audience"));
+    }
+
+    #[test]
+    fn public_output_authorization_denies_tampered_evidence_hash_after_signing() {
+        let credential = issue_credential(livesafe_draft());
+        let registry = registry_with_issuer(Some(vec![Permission::Read]));
+        let mut envelope = mint(draft_for(credential), &registry).expect("mint proof");
+        envelope.proof.evidence_hash = h256(0xE2);
+
+        let error = verify_livesafe_public_adapter_output_authorization_proof(
+            &envelope.proof,
+            &proof_signer_keypair().public,
+        )
+        .expect_err("tampered proof rejected");
+
+        assert!(error.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn public_output_authorization_action_commitment_binds_expiry() {
+        let credential = issue_credential(livesafe_draft());
+        let base = draft_for(credential.clone());
+        let mut changed_expiry = draft_for(credential);
+        changed_expiry.expires_at = ts(1_800_000);
+        changed_expiry.action_commitment_hash =
+            livesafe_public_adapter_output_authorization_action_commitment_hash(
+                &changed_expiry.credential,
+                &changed_expiry.subject,
+                &changed_expiry.audience,
+                changed_expiry.evidence_hash,
+                changed_expiry.idempotency_key_hash,
+                &changed_expiry.issued_at,
+                &changed_expiry.expires_at,
+            )
+            .expect("changed-expiry commitment");
+
+        assert_ne!(
+            base.action_commitment_hash, changed_expiry.action_commitment_hash,
+            "public-output action commitment must bind expires_at"
+        );
+    }
+
+    #[test]
+    fn public_output_authorization_payload_binds_public_claim_identity() {
+        let credential = issue_credential(livesafe_draft());
+        let base = sign_unchecked(draft_for(credential.clone()))
+            .expect("base proof")
+            .proof;
+
+        let mut changed_subject = draft_for(credential.clone());
+        changed_subject.subject = "example.invalid".into();
+        let changed_subject = sign_unchecked(changed_subject)
+            .expect("changed subject signed payload")
+            .proof;
+        assert_ne!(base.proof_hash, changed_subject.proof_hash);
+        assert_ne!(base.signature, changed_subject.signature);
+
+        let mut changed_audience = draft_for(credential.clone());
+        changed_audience.audience = "https://livesafe.ai/api/trust/status?variant=preview".into();
+        let changed_audience = sign_unchecked(changed_audience)
+            .expect("changed audience signed payload")
+            .proof;
+        assert_ne!(base.proof_hash, changed_audience.proof_hash);
+        assert_ne!(base.signature, changed_audience.signature);
+
+        for variant in [
+            {
+                let mut d = draft_for(credential.clone());
+                d.evidence_hash = h256(0xE3);
+                d.action_commitment_hash =
+                    livesafe_public_adapter_output_authorization_action_commitment_hash(
+                        &d.credential,
+                        &d.subject,
+                        &d.audience,
+                        d.evidence_hash,
+                        d.idempotency_key_hash,
+                        &d.issued_at,
+                        &d.expires_at,
+                    )
+                    .expect("variant commitment");
+                d
+            },
+            {
+                let mut d = draft_for(credential.clone());
+                d.expires_at = ts(1_800_000);
+                d.action_commitment_hash =
+                    livesafe_public_adapter_output_authorization_action_commitment_hash(
+                        &d.credential,
+                        &d.subject,
+                        &d.audience,
+                        d.evidence_hash,
+                        d.idempotency_key_hash,
+                        &d.issued_at,
+                        &d.expires_at,
+                    )
+                    .expect("variant commitment");
+                d
+            },
+            {
+                let mut altered = livesafe_draft();
+                altered.delegated_intent.intent_id = h256(0xA2);
+                draft_for(issue_credential(altered))
+            },
+            {
+                let mut d = draft_for(credential.clone());
+                d.idempotency_key_hash =
+                    livesafe_public_adapter_output_authorization_idempotency_hash("idem-live-2")
+                        .expect("idempotency hash");
+                d.action_commitment_hash =
+                    livesafe_public_adapter_output_authorization_action_commitment_hash(
+                        &d.credential,
+                        &d.subject,
+                        &d.audience,
+                        d.evidence_hash,
+                        d.idempotency_key_hash,
+                        &d.issued_at,
+                        &d.expires_at,
+                    )
+                    .expect("variant commitment");
+                d
+            },
+        ] {
+            let proof = sign_unchecked(variant).expect("variant proof").proof;
+            assert_ne!(base.proof_hash, proof.proof_hash);
+            assert_ne!(base.signature, proof.signature);
         }
     }
 }

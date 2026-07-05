@@ -38,6 +38,43 @@ pub use exo_avc::{
     AvcDraft, AvcError, AvcReasonCode, AvcRegistryRead, AvcRegistryWrite, AvcRevocation,
     AvcRevocationReason, AvcSubjectKind, AvcTrustReceipt, AvcValidationRequest,
     AvcValidationResult, ConsentRef, DataClass, DelegatedIntent, InMemoryAvcRegistry,
-    MAX_BASIS_POINTS, PolicyRef, TimeWindow, create_trust_receipt, delegate_avc, issue_avc,
-    parent_id_of, revoke_avc, validate_avc,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+    LivesafePublicAdapterOutputAuthorizationDraft,
+    LivesafePublicAdapterOutputAuthorizationEnvelope,
+    LivesafePublicAdapterOutputAuthorizationProof,
+    LivesafePublicAdapterOutputAuthorizationRevocationStatus, MAX_BASIS_POINTS, PolicyRef,
+    TimeWindow, create_trust_receipt, delegate_avc, issue_avc,
+    livesafe_public_adapter_output_authorization_action_commitment_hash,
+    livesafe_public_adapter_output_authorization_action_request,
+    livesafe_public_adapter_output_authorization_idempotency_hash,
+    mint_livesafe_public_adapter_output_authorization_proof, parent_id_of, revoke_avc,
+    validate_avc, validate_livesafe_public_adapter_output_authorization,
+    verify_livesafe_public_adapter_output_authorization_proof,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_output_authorization_reexports_core_proof_surface() {
+        assert_eq!(
+            LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
+            "livesafe.public_adapter_output_authorization.v1"
+        );
+        assert_eq!(
+            LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "livesafe.ai"
+        );
+        assert_eq!(
+            LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "https://livesafe.ai/api/trust/status"
+        );
+        let _: Option<LivesafePublicAdapterOutputAuthorizationDraft> = None;
+        let _: Option<LivesafePublicAdapterOutputAuthorizationEnvelope> = None;
+        let _: Option<LivesafePublicAdapterOutputAuthorizationProof> = None;
+        let _: Option<LivesafePublicAdapterOutputAuthorizationRevocationStatus> = None;
+    }
+}
