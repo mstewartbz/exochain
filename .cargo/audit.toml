@@ -38,4 +38,20 @@ ignore = [
     # EXOCHAIN runtime DB access is PostgreSQL-only; MySQL connection support is
     # not exposed by any owned runtime configuration.
     "RUSTSEC-2023-0071",
+
+    # derivative — no longer maintained proc-macro (Gate 6 "unmaintained" class).
+    # Transitive via ark-crypto-primitives -> ark-groth16 -> risc0-groth16 ->
+    # risc0-zkvm (VCG-001c risc0 verifier-only vendoring, ratified decision D1).
+    # Compile-time-only derive-macro helper; no runtime code path.
+    "RUSTSEC-2024-0388",
+
+    # tracing-subscriber 0.2.25 ANSI escape sequence injection when logging
+    # untrusted input to a terminal. Reported by cargo-audit as a vulnerability
+    # (denied by default regardless of --deny unsound/unmaintained). Transitive
+    # via risc0-zkvm's own dependency tree (ark-relations' internal tracing
+    # instrumentation, pulled in by the VCG-001c risc0 verifier-only vendoring).
+    # EXOCHAIN does not use this tracing-subscriber version to format or log
+    # untrusted external input; it is an internal dependency of the vendored
+    # verifier crate graph, not a logging sink this workspace configures.
+    "RUSTSEC-2025-0055",
 ]
