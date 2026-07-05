@@ -821,6 +821,14 @@ impl InMemoryAvcRegistry {
         self.get_receipt_by_action_commitment_excluding(action_commitment_hash, Hash256::ZERO)
     }
 
+    #[must_use]
+    pub fn get_receipt_by_action_id(&self, action_id: &Hash256) -> Option<AvcTrustReceipt> {
+        self.receipts
+            .values()
+            .find(|receipt| receipt.action_id.as_ref() == Some(action_id))
+            .cloned()
+    }
+
     fn get_receipt_by_action_commitment_excluding(
         &self,
         action_commitment_hash: &Hash256,

@@ -30,6 +30,7 @@
 //! | `POST` | `/api/v1/avc/issue` | Register a signed credential. |
 //! | `POST` | `/api/v1/avc/validate` | Validate a credential and optional action. |
 //! | `POST` | `/api/v1/avc/receipts/emit` | Validate a subject-signed action and mint a node-signed receipt. |
+//! | `POST` | `/api/v1/avc/livesafe/public-adapter-output-authorization` | Mint/export the redacted LiveSafe public adapter-output authorization proof. |
 //! | `GET`  | `/api/v1/avc/receipts/:hash` | Fetch a stored AVC trust receipt by hash. |
 //! | `GET`  | `/api/v1/avc/receipts?actor=<did>&limit=N` | List stored AVC trust receipts for a subject DID. |
 //! | `GET`  | `/api/v1/avc/protocol` | Discover node AVC protocol compatibility metadata. |
@@ -69,9 +70,16 @@ use exo_avc::{
     AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProof, AvcReceiptRfc3161TimestampProof,
     AvcReceiptRfc3161TrustAnchorKind, AvcReceiptTimestampProvenance, AvcRegistryDurableState,
     AvcRegistryRead, AvcRegistryWrite, AvcRevocation, AvcTrustReceipt, AvcTrustReceiptEvidence,
-    AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry, avc_action_commitment_hash,
+    AvcValidationRequest, AvcValidationResult, InMemoryAvcRegistry,
+    LivesafePublicAdapterOutputAuthorizationDraft,
+    LivesafePublicAdapterOutputAuthorizationEnvelope, avc_action_commitment_hash,
     avc_action_descriptor_hash, avc_action_signature_payload, create_trust_receipt_with_evidence,
+    livesafe_public_adapter_output_authorization_action_commitment_hash,
+    livesafe_public_adapter_output_authorization_action_request,
+    livesafe_public_adapter_output_authorization_idempotency_hash,
+    mint_livesafe_public_adapter_output_authorization_proof,
     require_supported_avc_protocol_version, validate_avc,
+    validate_livesafe_public_adapter_output_authorization,
 };
 use exo_core::{
     Did, Hash256, PublicKey, Signature, Timestamp, crypto,
@@ -2013,6 +2021,17 @@ pub struct EmitReceiptResponse {
     pub validation: AvcValidationResult,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicOutputAuthorizationRequest {
+    pub credential_id: Hash256,
+    pub subject: String,
+    pub audience: String,
+    pub evidence_hash: Hash256,
+    pub idempotency_key: String,
+    pub issued_at: Timestamp,
+    pub expires_at: Timestamp,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListAvcReceiptsResponse {
     pub did: String,
@@ -2681,6 +2700,133 @@ async fn handle_emit_receipt(
     Ok(Json(response))
 }
 
+async fn handle_public_output_authorization(
+    State(state): State<Arc<AvcApiState>>,
+    Json(payload): Json<PublicOutputAuthorizationRequest>,
+) -> ApiResult<Json<LivesafePublicAdapterOutputAuthorizationEnvelope>> {
+    let validator_did = state.validator_did.clone();
+    let receipt_signer = Arc::clone(&state.receipt_signer);
+    let idempotency_key_hash =
+        livesafe_public_adapter_output_authorization_idempotency_hash(&payload.idempotency_key)
+            .map_err(map_avc_error)?;
+    let credential_id = payload.credential_id;
+    let subject = payload.subject;
+    let audience = payload.audience;
+    let evidence_hash = payload.evidence_hash;
+    let issued_at = payload.issued_at;
+    let expires_at = payload.expires_at;
+
+    let envelope = with_registry_blocking(state, true, move |registry| {
+        let credential = registry.get_credential(&credential_id).ok_or((
+            StatusCode::NOT_FOUND,
+            "public output authorization credential is not registered".into(),
+        ))?;
+        let action = livesafe_public_adapter_output_authorization_action_request(
+            &credential,
+            &subject,
+            &audience,
+            evidence_hash,
+            idempotency_key_hash,
+        )
+        .map_err(map_avc_error)?;
+        let action_commitment_hash =
+            livesafe_public_adapter_output_authorization_action_commitment_hash(
+                &credential,
+                &subject,
+                &audience,
+                evidence_hash,
+                idempotency_key_hash,
+                &issued_at,
+            )
+            .map_err(map_avc_error)?;
+
+        if let Some(existing) = registry.get_receipt_by_action_id(&idempotency_key_hash) {
+            if existing.credential_id != credential_id
+                || existing.action_commitment_hash != Some(action_commitment_hash)
+            {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "public output authorization idempotency key conflict".into(),
+                ));
+            }
+            let draft = LivesafePublicAdapterOutputAuthorizationDraft {
+                credential,
+                subject,
+                audience,
+                evidence_hash,
+                credential_id: Some(credential_id),
+                receipt_id: existing.receipt_id,
+                action_commitment_hash,
+                idempotency_key_hash,
+                issued_at,
+                expires_at,
+                signer_did: validator_did,
+            };
+            return mint_livesafe_public_adapter_output_authorization_proof(
+                draft,
+                registry,
+                |bytes| (receipt_signer)(bytes),
+            )
+            .map_err(map_avc_error);
+        }
+
+        let action_descriptor = AvcActionDescriptor::from_action(&action);
+        let previous_receipt_hash = registry.receipt_chain_head();
+        let pre_receipt_draft = LivesafePublicAdapterOutputAuthorizationDraft {
+            credential: credential.clone(),
+            subject: subject.clone(),
+            audience: audience.clone(),
+            evidence_hash,
+            credential_id: Some(credential_id),
+            receipt_id: Hash256::ZERO,
+            action_commitment_hash,
+            idempotency_key_hash,
+            issued_at,
+            expires_at,
+            signer_did: validator_did.clone(),
+        };
+        let validation =
+            validate_livesafe_public_adapter_output_authorization(&pre_receipt_draft, registry)
+                .map_err(map_avc_error)?;
+        let receipt = create_trust_receipt_with_evidence(
+            &validation,
+            Some(action.action_id),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(action_commitment_hash),
+                action_descriptor: Some(action_descriptor),
+                previous_receipt_hash,
+                timestamp_provenance: None,
+                external_timestamp_proof: None,
+            },
+            validator_did.clone(),
+            issued_at,
+            |bytes| (receipt_signer)(bytes),
+        )
+        .map_err(map_avc_error)?;
+        store_receipt_idempotent(registry, receipt.clone())?;
+
+        let draft = LivesafePublicAdapterOutputAuthorizationDraft {
+            credential,
+            subject,
+            audience,
+            evidence_hash,
+            credential_id: Some(credential_id),
+            receipt_id: receipt.receipt_id,
+            action_commitment_hash,
+            idempotency_key_hash,
+            issued_at,
+            expires_at,
+            signer_did: validator_did,
+        };
+        mint_livesafe_public_adapter_output_authorization_proof(draft, registry, |bytes| {
+            (receipt_signer)(bytes)
+        })
+        .map_err(map_avc_error)
+    })
+    .await?;
+    Ok(Json(envelope))
+}
+
 async fn handle_get_receipt(
     State(state): State<Arc<AvcApiState>>,
     Path(id): Path<String>,
@@ -3008,6 +3154,10 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
         .route("/api/v1/avc/issue", post(handle_issue))
         .route("/api/v1/avc/validate", post(handle_validate))
         .route("/api/v1/avc/receipts/emit", post(handle_emit_receipt))
+        .route(
+            "/api/v1/avc/livesafe/public-adapter-output-authorization",
+            post(handle_public_output_authorization),
+        )
         .route("/api/v1/avc/receipts", get(handle_list_receipts))
         .route("/api/v1/avc/receipts/:hash", get(handle_get_receipt))
         .route("/api/v1/avc/protocol", get(handle_protocol_info))
@@ -5519,6 +5669,248 @@ mod tests {
             1,
             "identical receipt emission requests must remain idempotent"
         );
+    }
+
+    fn livesafe_public_output_credential() -> AutonomousVolitionCredential {
+        let mut draft = baseline_draft();
+        draft.subject_did = Did::new("did:exo:livesafe-public-adapter").unwrap();
+        draft.subject_kind = AvcSubjectKind::Service {
+            service_id: exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT.into(),
+        };
+        draft.delegated_intent.purpose = "Authorize narrow LiveSafe public adapter output".into();
+        draft.delegated_intent.allowed_objectives = vec!["publish-redacted-trust-status".into()];
+        draft.delegated_intent.autonomy_level = AutonomyLevel::ExecuteWithinBounds;
+        draft.authority_scope = AuthorityScope {
+            permissions: vec![Permission::Read],
+            tools: vec![exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN.into()],
+            data_classes: vec![exo_avc::DataClass::Public],
+            counterparties: vec![],
+            jurisdictions: vec!["US".into()],
+        };
+        issue_avc(draft, |bytes| issuer_keypair().sign(bytes)).unwrap()
+    }
+
+    fn store_livesafe_public_output_credential(
+        state: &AvcApiState,
+        credential: AutonomousVolitionCredential,
+    ) -> Hash256 {
+        let credential_id = credential.id().unwrap();
+        let mut registry = state.registry.lock().unwrap();
+        registry.put_issuer_permission_grant(
+            Did::new("did:exo:issuer").unwrap(),
+            vec![Permission::Read],
+        );
+        registry.put_credential(credential).unwrap();
+        credential_id
+    }
+
+    fn public_output_authorization_request(
+        credential_id: Hash256,
+        idempotency_key: &str,
+        evidence_hash: Hash256,
+        audience: &str,
+    ) -> PublicOutputAuthorizationRequest {
+        PublicOutputAuthorizationRequest {
+            credential_id,
+            subject: exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT.into(),
+            audience: audience.into(),
+            evidence_hash,
+            idempotency_key: idempotency_key.into(),
+            issued_at: Timestamp::new(1_500_000, 0),
+            expires_at: Timestamp::new(1_700_000, 0),
+        }
+    }
+
+    async fn post_public_output_authorization(
+        app: Router,
+        request: PublicOutputAuthorizationRequest,
+        bearer: Option<&str>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+            .header("content-type", "application/json");
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        app.oneshot(
+            builder
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_bearer_required() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-1",
+            Hash256::from_bytes([0xE1; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+
+        let response = post_public_output_authorization(app, request, None).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_exports_redacted_proof_happy_path() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-2",
+            Hash256::from_bytes([0xE2; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+
+        let response =
+            post_public_output_authorization(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        let envelope: exo_avc::LivesafePublicAdapterOutputAuthorizationEnvelope =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            envelope.proof.subject,
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT
+        );
+        assert_eq!(
+            envelope.proof.audience,
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE
+        );
+        assert_eq!(envelope.proof.credential_id, credential_id);
+        assert!(
+            !String::from_utf8(body).unwrap().contains("livesafe-issuer"),
+            "redacted proof envelope must not return raw credential internals"
+        );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_replay_same_body_returns_same_proof() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-3",
+            Hash256::from_bytes([0xE3; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+
+        let first = post_public_output_authorization(
+            app.clone(),
+            request.clone(),
+            Some("vcg-006a-admin-token"),
+        )
+        .await;
+        let second =
+            post_public_output_authorization(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(read_body(first).await, read_body(second).await);
+        assert_eq!(
+            state.registry.lock().unwrap().receipt_count(),
+            1,
+            "same public-output authorization body must reuse the same receipt/proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_conflicts_on_idempotency_key_reuse() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let first_request = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-4",
+            Hash256::from_bytes([0xE4; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+        let changed_evidence = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-4",
+            Hash256::from_bytes([0xE5; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+        let changed_audience = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-4",
+            Hash256::from_bytes([0xE4; 32]),
+            "https://example.invalid/api/trust/status",
+        );
+
+        let first = post_public_output_authorization(
+            app.clone(),
+            first_request,
+            Some("vcg-006a-admin-token"),
+        )
+        .await;
+        let evidence_conflict = post_public_output_authorization(
+            app.clone(),
+            changed_evidence,
+            Some("vcg-006a-admin-token"),
+        )
+        .await;
+        let audience_conflict =
+            post_public_output_authorization(app, changed_audience, Some("vcg-006a-admin-token"))
+                .await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(evidence_conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(audience_conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_is_not_receipts_emit_subject_signature_carve_out() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = serde_json::json!({
+            "credential_id": credential_id,
+            "subject": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "audience": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "evidence_hash": Hash256::from_bytes([0xE6; 32]),
+            "idempotency_key": "public-output-idem-5",
+            "issued_at": Timestamp::new(1_500_000, 0),
+            "expires_at": Timestamp::new(1_700_000, 0),
+            "subject_signature": Signature::from_bytes([0x7A; 64])
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "only /api/v1/avc/receipts/emit may use the subject-signature carve-out"
+        );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
     }
 
     #[tokio::test]
