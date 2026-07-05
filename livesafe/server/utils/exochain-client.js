@@ -8,6 +8,7 @@
  */
 
 const {
+  ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS,
   PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
   PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
   PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
@@ -28,9 +29,9 @@ const EXOCHAIN_UNAVAILABLE_ERROR = 'EXOCHAIN_UNAVAILABLE';
 const EXOCHAIN_GATEWAY_REJECTED_ERROR = 'EXOCHAIN_GATEWAY_REJECTED';
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE =
   '/api/v1/avc/livesafe/public-adapter-output-authorization';
-const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ENVELOPE_SCHEMA =
-  'exochain.avc.livesafe.public_adapter_output_authorization_envelope.v1';
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS = 5000;
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE =
+  'ed25519-public-adapter-output-authorization';
 const SHA256_EVIDENCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 function isRequiredTransportIdentifier(value) {
@@ -271,6 +272,33 @@ function publicAuthorizationTransportErrorState(error) {
   return 'unavailable';
 }
 
+function normalizePublicAuthorizationSignature(signature) {
+  return isNonEmptyString(signature) ? signature.trim() : null;
+}
+
+function publicAuthorizationRevocationState(revocationStatus) {
+  if (!isNonEmptyString(revocationStatus)) {
+    return 'rejected';
+  }
+
+  const normalized = revocationStatus.trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+  if (normalized === 'revoked') {
+    return 'revoked';
+  }
+
+  if (
+    normalized === 'active' ||
+    normalized === 'valid' ||
+    normalized === 'not_revoked' ||
+    normalized === 'non_revoked'
+  ) {
+    return 'active';
+  }
+
+  return 'rejected';
+}
+
 function adaptCorePublicAdapterOutputAuthorizationEnvelope(
   envelope,
   { subject, audience },
@@ -283,56 +311,60 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
     return { state: 'rejected', value: null };
   }
 
-  if (
-    envelope.envelope_schema !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ENVELOPE_SCHEMA &&
-    envelope.schema !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ENVELOPE_SCHEMA
-  ) {
+  if (envelope.domain !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA) {
     return { state: 'rejected', value: null };
   }
 
-  if (envelope.status === 'revoked' || envelope.revoked === true) {
-    return { state: 'revoked', value: null };
-  }
-
-  if (envelope.status === 'contradicted' || envelope.contradicted === true) {
-    return { state: 'contradicted', value: null };
-  }
-
-  if (envelope.status !== 'authorized') {
+  const proof = isObjectRecord(envelope.proof) ? envelope.proof : null;
+  if (!proof) {
     return { state: 'rejected', value: null };
   }
 
   if (
-    envelope.subject !== subject ||
-    envelope.audience !== audience ||
-    envelope.domain !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT
+    proof.domain !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA ||
+    proof.subject !== subject ||
+    proof.audience !== audience
   ) {
     return { state: 'rejected', value: null };
   }
 
-  const proof = isObjectRecord(envelope.proof) ? envelope.proof : {};
-  const receipt = isObjectRecord(envelope.receipt) ? envelope.receipt : {};
-  const generatedAt = coreTimestampToIso(envelope.generated_at ?? envelope.issued_at);
-  const validFrom = coreTimestampToIso(envelope.valid_from);
-  const expiresAt = coreTimestampToIso(envelope.expires_at);
+  if (
+    !isNonEmptyString(envelope.schema_version) ||
+    !isNonEmptyString(proof.schema_version)
+  ) {
+    return { state: 'rejected', value: null };
+  }
+
+  const revocationState = publicAuthorizationRevocationState(
+    proof.revocation_status,
+  );
+  if (revocationState !== 'active') {
+    return { state: revocationState, value: null };
+  }
+
+  const generatedAt = coreTimestampToIso(proof.issued_at);
+  const expiresAt = coreTimestampToIso(proof.expires_at);
+  const signature = normalizePublicAuthorizationSignature(proof.signature);
 
   return {
     state: 'permit',
     value: {
       schema: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
-      subject: envelope.subject,
-      audience: envelope.audience,
-      claims: Array.isArray(envelope.claims) ? [...envelope.claims] : envelope.claims,
-      evidence_hash: envelope.evidence_hash,
-      receipt_id: envelope.receipt_id || receipt.id,
-      proof_id: envelope.proof_id || proof.id,
-      proof_ref: envelope.proof_ref || proof.ref,
+      subject: proof.subject,
+      audience: proof.audience,
+      claims: [...ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS],
+      evidence_hash: proof.evidence_hash,
+      receipt_id: proof.receipt_id,
+      proof_id: proof.proof_hash,
+      proof_ref: isNonEmptyString(proof.proof_hash)
+        ? `exochain-avc:${proof.proof_hash}`
+        : null,
       generated_at: generatedAt,
-      valid_from: validFrom,
+      valid_from: generatedAt,
       expires_at: expiresAt,
       proof: {
-        type: proof.type,
-        signature: proof.signature,
+        type: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE,
+        signature,
       },
     },
   };

@@ -41,7 +41,66 @@ const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS: "2500",
 };
 
-const PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE = {
+const PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE = {
+  schema_version: "1",
+  domain: "livesafe.public_adapter_output_authorization.v1",
+  proof: {
+    schema_version: "1",
+    domain: "livesafe.public_adapter_output_authorization.v1",
+    subject: "livesafe.ai",
+    audience: "https://livesafe.ai/api/trust/status",
+    evidence_hash:
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    credential_id: "credential:livesafe-public-adapter-output",
+    receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+    action_commitment_hash:
+      "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    idempotency_key_hash:
+      "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    issued_at: {
+      physical_ms: Date.parse("2026-07-05T11:59:00.000Z"),
+      logical: 3,
+    },
+    expires_at: {
+      physical_ms: Date.parse("2026-07-05T12:05:00.000Z"),
+      logical: 0,
+    },
+    revocation_status: "active",
+    signer_did: "did:exo:livesafe:node",
+    proof_hash:
+      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    signature:
+      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+};
+
+const PUBLIC_ADAPTER_AUTHORIZATION_DTO_FROM_RUST = {
+  schema: "livesafe.public_adapter_output_authorization.v1",
+  subject: "livesafe.ai",
+  audience: "https://livesafe.ai/api/trust/status",
+  claims: [
+    "livesafe_public_trust_status",
+    "exochain_production_evidence_verified",
+    "livesafe_runtime_adapter_verified",
+  ],
+  evidence_hash:
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+  proof_id:
+    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  proof_ref:
+    "exochain-avc:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  generated_at: "2026-07-05T11:59:00.000Z",
+  valid_from: "2026-07-05T11:59:00.000Z",
+  expires_at: "2026-07-05T12:05:00.000Z",
+  proof: {
+    type: "ed25519-public-adapter-output-authorization",
+    signature:
+      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+};
+
+const PUBLIC_ADAPTER_AUTHORIZATION_LEGACY_FAKE_ENVELOPE = {
   envelope_schema:
     "exochain.avc.livesafe.public_adapter_output_authorization_envelope.v1",
   status: "authorized",
@@ -75,6 +134,23 @@ const PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE = {
   },
   expires_at: "2026-07-05T12:05:00.000Z",
 };
+
+function rustCoreEnvelope({
+  envelope = {},
+  proof = {},
+}: {
+  envelope?: Record<string, unknown>;
+  proof?: Record<string, unknown>;
+} = {}) {
+  return {
+    ...PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE,
+    ...envelope,
+    proof: {
+      ...PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE.proof,
+      ...proof,
+    },
+  };
+}
 
 const PUBLIC_ADAPTER_AUTHORIZATION_ENV_KEYS = Object.keys(
   PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG,
@@ -548,7 +624,7 @@ describe("EXOCHAIN client timestamp preservation", () => {
     const query = vi.spyOn(client, "query");
     const fetch = vi.fn(async () => ({
       ok: true,
-      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE,
     }));
     vi.stubGlobal("fetch", fetch);
 
@@ -560,29 +636,7 @@ describe("EXOCHAIN client timestamp preservation", () => {
 
     expect(result).toEqual({
       state: "permit",
-      value: {
-        schema: "livesafe.public_adapter_output_authorization.v1",
-        subject: "livesafe.ai",
-        audience: "https://livesafe.ai/api/trust/status",
-        claims: [
-          "livesafe_public_trust_status",
-          "exochain_production_evidence_verified",
-          "livesafe_runtime_adapter_verified",
-        ],
-        evidence_hash:
-          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
-        proof_id: "exo-proof:public-adapter-output:2026-07-05",
-        proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
-        generated_at: "2026-07-05T11:59:00.000Z",
-        valid_from: "2026-07-05T11:55:00.000Z",
-        expires_at: "2026-07-05T12:05:00.000Z",
-        proof: {
-          type: "ed25519-public-adapter-output-authorization",
-          signature:
-            "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        },
-      },
+      value: PUBLIC_ADAPTER_AUTHORIZATION_DTO_FROM_RUST,
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(
@@ -624,7 +678,7 @@ describe("EXOCHAIN client timestamp preservation", () => {
     const client = new ExochainClient("http://example.invalid/graphql");
     const fetch = vi.fn(async () => ({
       ok: true,
-      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE,
     }));
     vi.stubGlobal("fetch", fetch);
 
@@ -648,7 +702,7 @@ describe("EXOCHAIN client timestamp preservation", () => {
       "fetch",
       vi.fn(async () => ({
         ok: true,
-        json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        json: async () => PUBLIC_ADAPTER_AUTHORIZATION_RUST_CORE_ENVELOPE,
       })),
     );
 
@@ -660,29 +714,7 @@ describe("EXOCHAIN client timestamp preservation", () => {
 
     expect(result).toEqual({
       state: "permit",
-      value: {
-        schema: "livesafe.public_adapter_output_authorization.v1",
-        subject: "livesafe.ai",
-        audience: "https://livesafe.ai/api/trust/status",
-        claims: [
-          "livesafe_public_trust_status",
-          "exochain_production_evidence_verified",
-          "livesafe_runtime_adapter_verified",
-        ],
-        evidence_hash:
-          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
-        proof_id: "exo-proof:public-adapter-output:2026-07-05",
-        proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
-        generated_at: "2026-07-05T11:59:00.000Z",
-        valid_from: "2026-07-05T11:55:00.000Z",
-        expires_at: "2026-07-05T12:05:00.000Z",
-        proof: {
-          type: "ed25519-public-adapter-output-authorization",
-          signature:
-            "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        },
-      },
+      value: PUBLIC_ADAPTER_AUTHORIZATION_DTO_FROM_RUST,
     });
   });
 
@@ -714,106 +746,118 @@ describe("EXOCHAIN client timestamp preservation", () => {
 
   it.each([
     {
-      label: "wrong schema",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        envelope_schema:
-          "exochain.avc.livesafe.public_adapter_output_authorization_envelope.v0",
-      },
+      label: "legacy fake envelope_schema status fixture",
+      envelope: PUBLIC_ADAPTER_AUTHORIZATION_LEGACY_FAKE_ENVELOPE,
       expectedState: "rejected",
     },
     {
-      label: "wrong subject",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        subject: "www.livesafe.ai",
-      },
+      label: "missing top-level domain",
+      envelope: rustCoreEnvelope({ envelope: { domain: "" } }),
       expectedState: "rejected",
     },
     {
-      label: "wrong audience",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        audience: "https://livesafe.ai/api/health",
-      },
+      label: "wrong top-level domain",
+      envelope: rustCoreEnvelope({
+        envelope: { domain: "livesafe.public_adapter_output_authorization.v0" },
+      }),
       expectedState: "rejected",
     },
     {
-      label: "wrong domain",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        domain: "www.livesafe.ai",
-      },
+      label: "wrong nested proof domain",
+      envelope: rustCoreEnvelope({
+        proof: { domain: "livesafe.public_adapter_output_authorization.v0" },
+      }),
       expectedState: "rejected",
     },
     {
-      label: "expired",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        expires_at: "2026-07-05T11:59:59.999Z",
-      },
+      label: "wrong nested proof subject",
+      envelope: rustCoreEnvelope({ proof: { subject: "www.livesafe.ai" } }),
+      expectedState: "rejected",
+    },
+    {
+      label: "wrong nested proof audience",
+      envelope: rustCoreEnvelope({
+        proof: { audience: "https://livesafe.ai/api/health" },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "evidence hash mismatch",
+      envelope: rustCoreEnvelope({
+        proof: {
+          evidence_hash:
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "expired nested proof",
+      envelope: rustCoreEnvelope({
+        proof: { expires_at: "2026-07-05T11:59:59.999Z" },
+      }),
       expectedState: "stale",
     },
     {
-      label: "not yet valid",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        valid_from: "2026-07-05T12:00:01.000Z",
-      },
+      label: "not yet valid nested proof",
+      envelope: rustCoreEnvelope({
+        proof: { issued_at: "2026-07-05T12:00:01.000Z" },
+      }),
       expectedState: "stale",
     },
     {
-      label: "stale issued_at",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        issued_at: "2026-07-05T11:54:59.999Z",
-      },
+      label: "stale nested proof issued_at",
+      envelope: rustCoreEnvelope({
+        proof: { issued_at: "2026-07-05T11:54:59.999Z" },
+      }),
       expectedState: "stale",
     },
     {
-      label: "revoked status",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        status: "revoked",
-      },
+      label: "revoked revocation_status",
+      envelope: rustCoreEnvelope({ proof: { revocation_status: "revoked" } }),
       expectedState: "revoked",
     },
     {
-      label: "missing receipt",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        receipt: null,
-      },
+      label: "missing receipt_id",
+      envelope: rustCoreEnvelope({ proof: { receipt_id: "" } }),
       expectedState: "rejected",
     },
     {
-      label: "missing proof id",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        proof: {
-          ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE.proof,
-          id: "",
-        },
-      },
+      label: "missing proof_hash",
+      envelope: rustCoreEnvelope({ proof: { proof_hash: "" } }),
       expectedState: "rejected",
     },
     {
       label: "missing signature",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        proof: {
-          ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE.proof,
-          signature: "",
-        },
-      },
+      envelope: rustCoreEnvelope({ proof: { signature: "" } }),
+      expectedState: "rejected",
+    },
+    {
+      label: "object signature shape",
+      envelope: rustCoreEnvelope({
+        proof: { signature: { bytes: [1, 2, 3] } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "unknown issued_at shape",
+      envelope: rustCoreEnvelope({
+        proof: { issued_at: { physical_time: "2026-07-05T11:59:00.000Z" } },
+      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "unknown expires_at shape",
+      envelope: rustCoreEnvelope({
+        proof: { expires_at: { physical_time: "2026-07-05T12:05:00.000Z" } },
+      }),
       expectedState: "rejected",
     },
     {
       label: "raw sensitive field",
-      envelope: {
-        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
-        bearer_token: "Bearer secret-production-token",
-      },
+      envelope: rustCoreEnvelope({
+        envelope: { bearer_token: "Bearer secret-production-token" },
+      }),
       expectedState: "rejected",
     },
   ])("fails closed when public adapter-output authorization REST envelope is $label", async ({
