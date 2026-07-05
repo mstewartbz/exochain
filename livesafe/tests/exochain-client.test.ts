@@ -805,12 +805,12 @@ describe("EXOCHAIN client timestamp preservation", () => {
       "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
     );
     expect(secondRequest.expires_at).toEqual({
-      physical_ms: Date.parse("2026-07-05T12:11:00.000Z"),
+      physical_ms: Date.parse("2026-07-05T12:10:00.000Z"),
       logical: 0,
     });
   });
 
-  it("binds public adapter-output request idempotency to target, credential, evidence, and current time window", () => {
+  it("binds public adapter-output request idempotency to target, credential, evidence, and stable current time window material", () => {
     const baseRequest = {
       subject: "livesafe.ai",
       audience: "https://livesafe.ai/api/trust/status",
@@ -855,9 +855,15 @@ describe("EXOCHAIN client timestamp preservation", () => {
     expect(sameWindowRequest.idempotency_key).toBe(
       firstRequest.idempotency_key,
     );
+    expect(sameWindowRequest.expires_at).toEqual(firstRequest.expires_at);
     expect(nextWindowRequest.idempotency_key).not.toBe(
       firstRequest.idempotency_key,
     );
+    expect(nextWindowRequest.expires_at).not.toEqual(firstRequest.expires_at);
+    expect(nextWindowRequest.expires_at).toEqual({
+      physical_ms: Date.parse("2026-07-05T12:10:00.000Z"),
+      logical: 0,
+    });
     expect(evidenceChangedRequest.idempotency_key).not.toBe(
       firstRequest.idempotency_key,
     );

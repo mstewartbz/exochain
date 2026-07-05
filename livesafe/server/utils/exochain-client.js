@@ -267,15 +267,15 @@ function buildPublicAdapterOutputAuthorizationRequest({
     return null;
   }
 
-  const expiresPhysicalMs = currentTimestamp.physical_ms + ttlMs;
-  if (!Number.isSafeInteger(expiresPhysicalMs)) {
-    return null;
-  }
-
   const windowStartMs = publicAuthorizationWindowStartMs(
     currentTimestamp.physical_ms,
     ttlMs,
   );
+  const expiresPhysicalMs = windowStartMs + ttlMs;
+  if (!Number.isSafeInteger(expiresPhysicalMs)) {
+    return null;
+  }
+
   const digest = publicAuthorizationIdempotencyDigest({
     subject,
     audience,
