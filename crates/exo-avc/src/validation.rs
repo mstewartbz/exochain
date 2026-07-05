@@ -371,11 +371,12 @@ fn enforce_registered_issuer_grant<R: AvcRegistryRead>(
     else {
         return;
     };
-    if credential
-        .authority_scope
-        .permissions
-        .iter()
-        .any(|permission| !granted_permissions.contains(permission))
+    if granted_permissions.is_empty()
+        || credential
+            .authority_scope
+            .permissions
+            .iter()
+            .any(|permission| !granted_permissions.contains(permission))
     {
         reasons.insert(AvcReasonCode::ScopeWidening);
     }
@@ -1080,6 +1081,25 @@ mod tests {
         assert!(
             result.reason_codes.contains(&AvcReasonCode::ScopeWidening),
             "root issuer grants must cap credential-declared permissions"
+        );
+    }
+
+    #[test]
+    fn denies_all_credentials_from_issuer_capped_to_empty_permission_set() {
+        let mut h = Harness::new();
+        h.registry
+            .put_issuer_permission_grant(did("issuer"), vec![]);
+        let mut draft = baseline_draft();
+        draft.authority_scope.permissions = vec![];
+        let cred = h.issue(draft);
+        let request = baseline_request(cred, ts(1_500_000));
+
+        let result = validate_avc(&request, &h.registry).unwrap();
+
+        assert_eq!(result.decision, AvcDecision::Deny);
+        assert!(
+            result.reason_codes.contains(&AvcReasonCode::ScopeWidening),
+            "an issuer capped to no permissions must be able to sign nothing"
         );
     }
 
