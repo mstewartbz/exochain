@@ -76,10 +76,15 @@ deployment_ready() {
 
 deployment_failed_or_stopped() {
   printf '%s' "$1" | jq -e '
-    .stopped == true or
+    def transient_status:
+      .status == "INITIALIZING" or
+      .status == "BUILDING" or
+      .status == "DEPLOYING" or
+      .status == "QUEUED";
     .status == "FAILED" or
     .status == "CRASHED" or
-    .status == "REMOVED"
+    .status == "REMOVED" or
+    (.stopped == true and (transient_status | not))
   ' >/dev/null
 }
 

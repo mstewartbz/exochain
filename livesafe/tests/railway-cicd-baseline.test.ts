@@ -361,6 +361,180 @@ esac
     }
   });
 
+  it("waits through transient initializing stopped status before URL smoke", () => {
+    const testRoot = mkdtempSync(join(tmpdir(), "livesafe-railway-smoke-"));
+    const binDir = join(testRoot, "bin");
+    const railwayCallLog = join(testRoot, "railway.log");
+    const curlCallLog = join(testRoot, "curl.log");
+    const sleepCallLog = join(testRoot, "sleep.log");
+    const livesafeStatusCount = join(testRoot, "livesafe-status-count");
+
+    mkdirSync(binDir);
+
+    writeExecutable(
+      join(binDir, "railway"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$RAILWAY_FAKE_CALL_LOG"
+
+case "\${1:-} \${2:-}" in
+  "service list")
+    cat <<'JSON'
+[
+  {
+    "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+    "name": "livesafe",
+    "status": "SUCCESS",
+    "deploymentStopped": false,
+    "deploymentId": "23f5fa75-9f52-44ef-b23e-8769276c7cca",
+    "latestDeployment": {
+      "id": "23f5fa75-9f52-44ef-b23e-8769276c7cca",
+      "status": "SUCCESS",
+      "deploymentStopped": false
+    },
+    "url": "https://livesafe-development.up.railway.app"
+  },
+  {
+    "id": "4d8384d3-be5d-48d6-a914-97eb6133e53d",
+    "name": "exochain-node",
+    "status": "SUCCESS",
+    "deploymentStopped": false,
+    "deploymentId": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+    "latestDeployment": {
+      "id": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+      "status": "SUCCESS",
+      "deploymentStopped": false
+    }
+  },
+  { "id": "2ab3f445-d6f7-4245-940c-985a14e974f9", "name": "exochain-node-db", "status": "SUCCESS" },
+  { "id": "691122bb-025b-463d-8033-7f94f7678748", "name": "Postgres", "status": "SUCCESS" }
+]
+JSON
+    ;;
+  "service status")
+    service=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service|-s)
+          shift
+          service="\${1:-}"
+          ;;
+      esac
+      shift || break
+    done
+
+    if [ "$service" = "8ed3bd1a-f872-4e22-9a39-ac38953fae26" ]; then
+      count="0"
+      if [ -f "$LIVESAFE_STATUS_COUNT_FILE" ]; then
+        count="$(cat "$LIVESAFE_STATUS_COUNT_FILE")"
+      fi
+      count="$((count + 1))"
+      printf '%s\\n' "$count" > "$LIVESAFE_STATUS_COUNT_FILE"
+
+      if [ "$count" -eq 1 ]; then
+        cat <<'JSON'
+{
+  "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+  "name": "livesafe",
+  "deploymentId": "23f5fa75-9f52-44ef-b23e-8769276c7cca",
+  "status": "INITIALIZING",
+  "stopped": true
+}
+JSON
+      else
+        cat <<'JSON'
+{
+  "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+  "name": "livesafe",
+  "deploymentId": "23f5fa75-9f52-44ef-b23e-8769276c7cca",
+  "status": "SUCCESS",
+  "stopped": false
+}
+JSON
+      fi
+    elif [ "$service" = "4d8384d3-be5d-48d6-a914-97eb6133e53d" ]; then
+      cat <<'JSON'
+{
+  "id": "4d8384d3-be5d-48d6-a914-97eb6133e53d",
+  "name": "exochain-node",
+  "deploymentId": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+  "status": "SUCCESS",
+  "stopped": false
+}
+JSON
+    else
+      printf 'unexpected service %s\\n' "$service" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf 'unexpected railway command: %s\\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`,
+    );
+
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$CURL_FAKE_CALL_LOG"
+url="\${@: -1}"
+
+case "$url" in
+  */api/health)
+    printf '%s\\n' '{"status":"ok","database":"connected","exochain_connected":true}'
+    ;;
+  */api/trust/status)
+    printf '%s\\n' '{"exochain_connected":true,"verified_runtime_adapter":true,"runtime_adapter_state":"verified","public_claims_allowed":false}'
+    ;;
+  *)
+    printf 'unexpected curl url: %s\\n' "$url" >&2
+    exit 2
+    ;;
+esac
+`,
+    );
+
+    writeExecutable(
+      join(binDir, "sleep"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$SLEEP_FAKE_CALL_LOG"
+`,
+    );
+
+    try {
+      const result = spawnSync(
+        "/usr/bin/env",
+        ["bash", resolve(repoRoot, "scripts/livesafe-railway-smoke.sh"), "development"],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CURL_FAKE_CALL_LOG: curlCallLog,
+            LIVESAFE_RAILWAY_SMOKE_TIMEOUT_SECONDS: "60",
+            LIVESAFE_STATUS_COUNT_FILE: livesafeStatusCount,
+            PATH: `${binDir}:${process.env.PATH ?? ""}`,
+            RAILWAY_FAKE_CALL_LOG: railwayCallLog,
+            SLEEP_FAKE_CALL_LOG: sleepCallLog,
+          },
+        },
+      );
+
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain("LiveSafe development Railway smoke passed");
+      expect(readFileSync(livesafeStatusCount, "utf8").trim()).toBe("2");
+      expect(readFileSync(sleepCallLog, "utf8")).toBe("10\n");
+      expect(readFileSync(curlCallLog, "utf8")).toContain("/api/health");
+      expect(readFileSync(curlCallLog, "utf8")).toContain("/api/trust/status");
+    } finally {
+      rmSync(testRoot, { force: true, recursive: true });
+    }
+  });
+
   it("supports explicit fail-closed and authorized-green public-claims smoke contracts", () => {
     const script = readRepoFile("scripts/livesafe-railway-smoke.sh");
 
