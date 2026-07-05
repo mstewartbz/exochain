@@ -2037,6 +2037,8 @@ pub struct RegisterIssuerRequest {
     pub public_key_hex: String,
     #[serde(default)]
     pub authority_chain: Option<exo_authority::AuthorityChain>,
+    #[serde(default)]
+    pub granted_permissions: Vec<Permission>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2054,6 +2056,11 @@ struct ListAvcReceiptsQuery {
 #[derive(Debug, Deserialize)]
 struct AvcProtocolQuery {
     protocol_version: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssuerRegistrationAuthorityQuery {
+    operator_did: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2893,11 +2900,21 @@ async fn handle_register_issuer(
     };
     verify_issuer_registration_authority(&state, chain)?;
 
+    if payload.granted_permissions.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "issuer registration requires a non-empty granted_permissions cap".into(),
+        ));
+    }
+    let granted_permissions: BTreeSet<Permission> =
+        payload.granted_permissions.iter().copied().collect();
+
     let registered_at = trusted_local_hlc_timestamp(&state).map_err(local_hlc_timestamp_error)?;
     let record = exo_avc::RegisteredIssuerKey {
         public_key,
         authority_chain: chain.clone(),
         registered_at,
+        granted_permissions,
     };
     let issuer_did_for_registry = issuer_did.clone();
     with_registry_blocking(state, true, move |registry| {
@@ -2950,6 +2967,24 @@ async fn handle_list_for_subject(
     }))
 }
 
+async fn handle_get_issuer_registration_authority_chain(
+    State(state): State<Arc<AvcApiState>>,
+    Query(query): Query<IssuerRegistrationAuthorityQuery>,
+) -> ApiResult<Json<exo_authority::AuthorityChain>> {
+    let operator_did_raw = query.operator_did.ok_or((
+        StatusCode::BAD_REQUEST,
+        "operator_did query parameter is required".into(),
+    ))?;
+    let operator_did = parse_did(&operator_did_raw)?;
+    let chain = state
+        .find_delegated_issuer_registration_chain(&operator_did)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "no active issuer-registration authority grant for that operator_did".into(),
+        ))?;
+    Ok(Json(chain))
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -2969,6 +3004,10 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
         .route("/api/v1/avc/delegate", post(handle_delegate))
         .route("/api/v1/avc/revoke", post(handle_revoke))
         .route("/api/v1/avc/issuers", post(handle_register_issuer))
+        .route(
+            "/api/v1/avc/issuer-registration-authority",
+            get(handle_get_issuer_registration_authority_chain),
+        )
         .route("/api/v1/avc/:id", get(handle_get))
         .route("/api/v1/agents/:did/avcs", get(handle_list_for_subject))
         .with_state(state)
@@ -7799,6 +7838,7 @@ mod avc_issuer_conformance_tests {
             "issuer_did": issuer_did.to_string(),
             "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
             "authority_chain": chain,
+            "granted_permissions": ["Read", "Write"],
         });
         let app = issuer_router_with_bearer_gate(Arc::clone(&state));
         let register_response = app
@@ -8204,6 +8244,7 @@ mod avc_issuer_registration_authority_tests {
             "issuer_did": issuer_did.to_string(),
             "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
             "authority_chain": chain,
+            "granted_permissions": ["Read", "Write"],
         });
         let app = router_with_bearer_gate(Arc::clone(&state));
         let register_response = app
@@ -8348,5 +8389,190 @@ mod avc_issuer_registration_authority_tests {
                 .resolve_public_key(&issuer_did),
             None
         );
+    }
+
+    fn state_with_granted_operator() -> (Arc<AvcApiState>, exo_authority::AuthorityChain) {
+        let state = fresh_state();
+        let validator_kp = validator_keypair();
+        state
+            .registry
+            .lock()
+            .unwrap()
+            .put_public_key(validator_did(), validator_kp.public);
+        let now = Timestamp::new(1_000, 0);
+        let expires = Timestamp::new(9_000_000, 0);
+        state
+            .grant_issuer_registration_authority(
+                operator_did(),
+                DelegateeKind::Human,
+                &validator_kp.public,
+                expires,
+                &now,
+                |payload| validator_kp.sign(payload),
+            )
+            .expect("grant issuer-registration authority");
+        let chain = state
+            .find_delegated_issuer_registration_chain(&operator_did())
+            .expect("chain resolvable after grant");
+        (state, chain)
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_rejects_empty_permission_cap() {
+        let (state, chain) = state_with_granted_operator();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+            "granted_permissions": [],
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_public_key(&issuer_did),
+            None,
+            "a rejected registration must not register the key"
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_applies_permission_cap() {
+        let (state, chain) = state_with_granted_operator();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+            "granted_permissions": ["Read", "Write"],
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .resolve_issuer_permission_grant(&issuer_did),
+            Some(vec![Permission::Read, Permission::Write]),
+            "the registered issuer must be capped to exactly the granted permissions"
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_authority_chain_export_returns_granted_chain() {
+        let (state, chain) = state_with_granted_operator();
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let uri = format!(
+            "/api/v1/avc/issuer-registration-authority?operator_did={}",
+            operator_did()
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body(response).await;
+        let exported: exo_authority::AuthorityChain =
+            serde_json::from_slice(&body).expect("export body is an AuthorityChain");
+        assert_eq!(exported, chain);
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_authority_chain_export_requires_operator_did() {
+        let (state, _chain) = state_with_granted_operator();
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/avc/issuer-registration-authority")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_authority_chain_export_absent_grant_is_not_found() {
+        let state = fresh_state();
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let uri = format!(
+            "/api/v1/avc/issuer-registration-authority?operator_did={}",
+            operator_did()
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_authority_chain_export_requires_bearer() {
+        let (state, _chain) = state_with_granted_operator();
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let uri = format!(
+            "/api/v1/avc/issuer-registration-authority?operator_did={}",
+            operator_did()
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

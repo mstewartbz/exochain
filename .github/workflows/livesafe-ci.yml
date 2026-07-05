@@ -53,19 +53,17 @@ jobs:
           node-version: 22
       - name: Install root dev dependencies
         run: npm ci
+      - name: Install server dependencies for quality tests
+        run: npm --prefix server ci
+      - name: Run LiveSafe quality gate
+        run: npm run quality
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
       - name: Build client (production artifact)
         run: |
-          cd client
-          npm ci
-          npm run build
+          npm --prefix client ci
+          npm --prefix client run build
       - name: Build responder
         run: |
-          cd responder
-          npm ci
-          npm run build
-      - name: Install server dependencies (resolve check)
-        run: |
-          cd server
-          npm ci
+          npm --prefix responder ci
+          npm --prefix responder run build

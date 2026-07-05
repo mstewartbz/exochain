@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 describe("GitHub quality workflow", () => {
   it("installs server dependencies before root quality tests import server routes", () => {
     const workflow = readFileSync(
-      resolve(process.cwd(), ".github/workflows/quality.yml"),
+      resolve(process.cwd(), "../.github/workflows/livesafe-ci.yml"),
       "utf8",
     );
 
@@ -13,7 +13,7 @@ describe("GitHub quality workflow", () => {
     const serverInstallIndex = workflow.indexOf("run: npm --prefix server ci");
     const qualityIndex = workflow.indexOf("run: npm run quality");
 
-    expect(workflow).toContain("server/package-lock.json");
+    expect(workflow).toContain("livesafe/**");
     expect(rootInstallIndex).toBeGreaterThanOrEqual(0);
     expect(serverInstallIndex).toBeGreaterThan(rootInstallIndex);
     expect(qualityIndex).toBeGreaterThan(serverInstallIndex);

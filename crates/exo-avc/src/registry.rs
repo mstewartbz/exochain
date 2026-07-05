@@ -101,6 +101,8 @@ pub struct RegisteredIssuerKey {
     pub public_key: PublicKey,
     pub authority_chain: AuthorityChain,
     pub registered_at: Timestamp,
+    #[serde(default)]
+    pub granted_permissions: BTreeSet<Permission>,
 }
 
 /// Durable AVC runtime records.
@@ -410,7 +412,10 @@ impl InMemoryAvcRegistry {
         for (issuer_did, record) in records {
             match self.verify_registered_issuer_key_chain(&issuer_did, &record, now) {
                 Ok(()) => {
-                    self.public_keys.insert(issuer_did, record.public_key);
+                    self.public_keys
+                        .insert(issuer_did.clone(), record.public_key);
+                    self.issuer_permission_grants
+                        .insert(issuer_did, record.granted_permissions.clone());
                 }
                 Err(error) => {
                     // Fail closed on trust (the key is never admitted), but
@@ -944,6 +949,9 @@ impl AvcRegistryWrite for InMemoryAvcRegistry {
     fn put_registered_issuer_key(&mut self, did: Did, record: RegisteredIssuerKey) {
         // Immediately resolvable on this running node (no restart needed) ...
         self.public_keys.insert(did.clone(), record.public_key);
+        // ... and immediately capped to the durable permission ceiling.
+        self.issuer_permission_grants
+            .insert(did.clone(), record.granted_permissions.clone());
         // ... AND durably recorded with its authorizing provenance so it
         // survives a restart (VCG-006b / #736 hard requirement (a)). Distinct
         // from `put_public_key`'s startup-config anchors, which are never
@@ -2331,6 +2339,7 @@ mod tests {
                 public_key: issuer_keypair.public,
                 authority_chain: chain,
                 registered_at: now,
+                granted_permissions: BTreeSet::from([Permission::Read, Permission::Write]),
             },
         );
 
@@ -2341,6 +2350,11 @@ mod tests {
             Some(issuer_keypair.public)
         );
         assert_eq!(live.registered_issuer_key_count(), 1);
+        assert_eq!(
+            live.resolve_issuer_permission_grant(&issuer_did),
+            Some(vec![Permission::Read, Permission::Write]),
+            "runtime issuer permission cap must be applied immediately"
+        );
 
         // Simulate a restart: export durable state, reconstruct fresh, then
         // restore verified startup configuration (the validator's own key)
@@ -2366,6 +2380,11 @@ mod tests {
             restarted.resolve_public_key(&issuer_did),
             Some(issuer_keypair.public),
             "runtime-registered issuer key must survive a restart (#736 hard requirement (a))"
+        );
+        assert_eq!(
+            restarted.resolve_issuer_permission_grant(&issuer_did),
+            Some(vec![Permission::Read, Permission::Write]),
+            "runtime issuer permission cap must survive a restart alongside its key"
         );
 
         // A credential from that issuer still validates end-to-end on the
@@ -2406,6 +2425,7 @@ mod tests {
                 public_key: issuer_keypair.public,
                 authority_chain: chain,
                 registered_at: now,
+                granted_permissions: BTreeSet::new(),
             },
         );
 
@@ -2460,6 +2480,7 @@ mod tests {
                 public_key: issuer_keypair.public,
                 authority_chain: chain,
                 registered_at: now,
+                granted_permissions: BTreeSet::new(),
             },
         );
 
@@ -2531,6 +2552,7 @@ mod tests {
                 public_key: good_issuer_keypair.public,
                 authority_chain: good_chain,
                 registered_at: now,
+                granted_permissions: BTreeSet::new(),
             },
         );
         live.put_registered_issuer_key(
@@ -2539,6 +2561,7 @@ mod tests {
                 public_key: bad_issuer_keypair.public,
                 authority_chain: bad_chain,
                 registered_at: now,
+                granted_permissions: BTreeSet::new(),
             },
         );
         assert_eq!(live.registered_issuer_key_count(), 2);
