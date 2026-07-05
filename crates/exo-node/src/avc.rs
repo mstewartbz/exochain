@@ -2028,7 +2028,6 @@ pub struct PublicOutputAuthorizationRequest {
     pub audience: String,
     pub evidence_hash: Hash256,
     pub idempotency_key: String,
-    pub issued_at: Timestamp,
     pub expires_at: Timestamp,
 }
 
@@ -2713,8 +2712,8 @@ async fn handle_public_output_authorization(
     let subject = payload.subject;
     let audience = payload.audience;
     let evidence_hash = payload.evidence_hash;
-    let issued_at = payload.issued_at;
     let expires_at = payload.expires_at;
+    let state_for_clock = Arc::clone(&state);
 
     let envelope = with_registry_blocking(state, true, move |registry| {
         let credential = registry.get_credential(&credential_id).ok_or((
@@ -2729,18 +2728,18 @@ async fn handle_public_output_authorization(
             idempotency_key_hash,
         )
         .map_err(map_avc_error)?;
-        let action_commitment_hash =
-            livesafe_public_adapter_output_authorization_action_commitment_hash(
-                &credential,
-                &subject,
-                &audience,
-                evidence_hash,
-                idempotency_key_hash,
-                &issued_at,
-            )
-            .map_err(map_avc_error)?;
 
         if let Some(existing) = registry.get_receipt_by_action_id(&idempotency_key_hash) {
+            let action_commitment_hash =
+                livesafe_public_adapter_output_authorization_action_commitment_hash(
+                    &credential,
+                    &subject,
+                    &audience,
+                    evidence_hash,
+                    idempotency_key_hash,
+                    &existing.created_at,
+                )
+                .map_err(map_avc_error)?;
             if existing.credential_id != credential_id
                 || existing.action_commitment_hash != Some(action_commitment_hash)
             {
@@ -2758,7 +2757,7 @@ async fn handle_public_output_authorization(
                 receipt_id: existing.receipt_id,
                 action_commitment_hash,
                 idempotency_key_hash,
-                issued_at,
+                issued_at: existing.created_at,
                 expires_at,
                 signer_did: validator_did,
             };
@@ -2770,6 +2769,18 @@ async fn handle_public_output_authorization(
             .map_err(map_avc_error);
         }
 
+        let issued_at =
+            trusted_local_hlc_timestamp(&state_for_clock).map_err(local_hlc_timestamp_error)?;
+        let action_commitment_hash =
+            livesafe_public_adapter_output_authorization_action_commitment_hash(
+                &credential,
+                &subject,
+                &audience,
+                evidence_hash,
+                idempotency_key_hash,
+                &issued_at,
+            )
+            .map_err(map_avc_error)?;
         let action_descriptor = AvcActionDescriptor::from_action(&action);
         let previous_receipt_hash = registry.receipt_chain_head();
         let pre_receipt_draft = LivesafePublicAdapterOutputAuthorizationDraft {
@@ -2795,7 +2806,7 @@ async fn handle_public_output_authorization(
                 action_commitment_hash: Some(action_commitment_hash),
                 action_descriptor: Some(action_descriptor),
                 previous_receipt_hash,
-                timestamp_provenance: None,
+                timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
                 external_timestamp_proof: None,
             },
             validator_did.clone(),
@@ -5672,11 +5683,23 @@ mod tests {
     }
 
     fn livesafe_public_output_credential() -> AutonomousVolitionCredential {
+        livesafe_public_output_credential_with_window(
+            Timestamp::new(1_000_000, 0),
+            Timestamp::new(2_000_000, 0),
+        )
+    }
+
+    fn livesafe_public_output_credential_with_window(
+        created_at: Timestamp,
+        expires_at: Timestamp,
+    ) -> AutonomousVolitionCredential {
         let mut draft = baseline_draft();
         draft.subject_did = Did::new("did:exo:livesafe-public-adapter").unwrap();
         draft.subject_kind = AvcSubjectKind::Service {
             service_id: exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT.into(),
         };
+        draft.created_at = created_at;
+        draft.expires_at = Some(expires_at);
         draft.delegated_intent.purpose = "Authorize narrow LiveSafe public adapter output".into();
         draft.delegated_intent.allowed_objectives = vec!["publish-redacted-trust-status".into()];
         draft.delegated_intent.autonomy_level = AutonomyLevel::ExecuteWithinBounds;
@@ -5716,7 +5739,6 @@ mod tests {
             audience: audience.into(),
             evidence_hash,
             idempotency_key: idempotency_key.into(),
-            issued_at: Timestamp::new(1_500_000, 0),
             expires_at: Timestamp::new(1_700_000, 0),
         }
     }
@@ -5724,6 +5746,15 @@ mod tests {
     async fn post_public_output_authorization(
         app: Router,
         request: PublicOutputAuthorizationRequest,
+        bearer: Option<&str>,
+    ) -> axum::response::Response {
+        post_public_output_authorization_json(app, serde_json::to_value(request).unwrap(), bearer)
+            .await
+    }
+
+    async fn post_public_output_authorization_json(
+        app: Router,
+        request: serde_json::Value,
         bearer: Option<&str>,
     ) -> axum::response::Response {
         let mut builder = Request::builder()
@@ -5794,6 +5825,126 @@ mod tests {
             !String::from_utf8(body).unwrap().contains("livesafe-issuer"),
             "redacted proof envelope must not return raw credential internals"
         );
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_uses_trusted_local_hlc_for_proof_and_receipt_time() {
+        let state = fresh_state();
+        let trusted_floor = trusted_local_hlc_timestamp(&state).unwrap();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let caller_supplied_time = Timestamp::new(1_500_000, 0);
+        let request = serde_json::json!({
+            "credential_id": credential_id,
+            "subject": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "audience": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "evidence_hash": Hash256::from_bytes([0xD1; 32]),
+            "idempotency_key": "public-output-idem-trusted-hlc",
+            "issued_at": caller_supplied_time,
+            "expires_at": Timestamp::new(1_700_000, 0)
+        });
+
+        let response =
+            post_public_output_authorization_json(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let envelope: exo_avc::LivesafePublicAdapterOutputAuthorizationEnvelope =
+            serde_json::from_slice(&read_body(response).await).unwrap();
+        let receipt = state
+            .registry
+            .lock()
+            .unwrap()
+            .get_receipt(&envelope.proof.receipt_id)
+            .unwrap();
+        assert_ne!(envelope.proof.issued_at, caller_supplied_time);
+        assert!(
+            envelope.proof.issued_at > trusted_floor,
+            "public-output proof time must come from this node's trusted local HLC"
+        );
+        assert_eq!(receipt.created_at, envelope.proof.issued_at);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_rejects_backdated_resurrection_of_expired_credential() {
+        let state = fresh_state();
+        let credential = livesafe_public_output_credential_with_window(
+            Timestamp::new(900_000, 0),
+            Timestamp::new(1_000_000, 0),
+        );
+        let credential_id = store_livesafe_public_output_credential(&state, credential);
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = serde_json::json!({
+            "credential_id": credential_id,
+            "subject": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "audience": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "evidence_hash": Hash256::from_bytes([0xD2; 32]),
+            "idempotency_key": "public-output-idem-backdate-expired",
+            "issued_at": Timestamp::new(950_000, 0),
+            "expires_at": Timestamp::new(999_000, 0)
+        });
+
+        let response =
+            post_public_output_authorization_json(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_rejects_future_dated_premature_not_yet_valid_credential() {
+        let state = fresh_state();
+        let credential = livesafe_public_output_credential_with_window(
+            Timestamp::new(1_100_000, 0),
+            Timestamp::new(1_700_000, 0),
+        );
+        let credential_id = store_livesafe_public_output_credential(&state, credential);
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = serde_json::json!({
+            "credential_id": credential_id,
+            "subject": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "audience": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "evidence_hash": Hash256::from_bytes([0xD3; 32]),
+            "idempotency_key": "public-output-idem-future-date-not-yet-valid",
+            "issued_at": Timestamp::new(1_200_000, 0),
+            "expires_at": Timestamp::new(1_500_000, 0)
+        });
+
+        let response =
+            post_public_output_authorization_json(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.registry.lock().unwrap().receipt_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_replay_omits_caller_time_and_reuses_trusted_receipt() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let request = serde_json::json!({
+            "credential_id": credential_id,
+            "subject": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+            "audience": exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+            "evidence_hash": Hash256::from_bytes([0xD4; 32]),
+            "idempotency_key": "public-output-idem-no-caller-time",
+            "expires_at": Timestamp::new(1_700_000, 0)
+        });
+
+        let first = post_public_output_authorization_json(
+            app.clone(),
+            request.clone(),
+            Some("vcg-006a-admin-token"),
+        )
+        .await;
+        let second =
+            post_public_output_authorization_json(app, request, Some("vcg-006a-admin-token")).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(read_body(first).await, read_body(second).await);
         assert_eq!(state.registry.lock().unwrap().receipt_count(), 1);
     }
 
