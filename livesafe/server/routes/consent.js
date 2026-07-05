@@ -63,6 +63,10 @@ function authMiddleware(req, res, next) {
   try {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, JWT_SECRET);
+    const isSubscriber = decoded.user_type === 'subscriber' || decoded.role === 'subscriber';
+    if (!isSubscriber) {
+      return res.status(403).json({ error: 'Subscriber account required' });
+    }
     req.user = decoded;
     next();
   } catch (err) {
@@ -619,16 +623,25 @@ router.post('/provider', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Scope is required' });
     }
 
-    // Resolve subscriber ID from DID if needed
-    let resolvedSubscriberId = subscriber_id;
-    let resolvedSubscriberDid = subscriber_did;
-    if (!resolvedSubscriberId && subscriber_did) {
-      const subResult = await db.query('SELECT id, did FROM subscribers WHERE did = $1', [subscriber_did]);
-      if (subResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Subscriber not found' });
-      }
-      resolvedSubscriberId = subResult.rows[0].id;
-      resolvedSubscriberDid = subResult.rows[0].did;
+    const authenticatedSubscriberId = String(req.user.id);
+    const authenticatedSubscriberDid = req.user.did || null;
+
+    if (subscriber_id && String(subscriber_id) !== authenticatedSubscriberId) {
+      return res.status(403).json({ error: 'Cannot grant consent for another subscriber' });
+    }
+    if (subscriber_did && authenticatedSubscriberDid && subscriber_did !== authenticatedSubscriberDid) {
+      return res.status(403).json({ error: 'Cannot grant consent for another subscriber' });
+    }
+
+    const subResult = await db.query('SELECT id, did FROM subscribers WHERE id = $1', [req.user.id]);
+    if (subResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Subscriber not found' });
+    }
+    const resolvedSubscriberId = subResult.rows[0].id;
+    const resolvedSubscriberDid = subResult.rows[0].did;
+
+    if (subscriber_did && subscriber_did !== resolvedSubscriberDid) {
+      return res.status(403).json({ error: 'Cannot grant consent for another subscriber' });
     }
 
     // Resolve provider ID from DID if needed
