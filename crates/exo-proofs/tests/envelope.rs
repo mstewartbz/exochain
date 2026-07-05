@@ -198,7 +198,7 @@ fn envelope_backend_registry_rejects_unregistered_numeric_id() {
 fn envelope_wrapping_unaudited_backend_refuses_without_feature() {
     let envelope = sample_envelope(); // backend_id == UNAUDITED_BLAKE3_STANDIN_BACKEND_ID
 
-    let result = envelope.verify();
+    let result = envelope.verify(&[]);
     assert!(
         matches!(
             result,
@@ -225,7 +225,7 @@ fn envelope_wrapping_unaudited_backend_construction_allowed_but_verify_fails_clo
     // itself is not implemented in this lane (VCG-001a). `verify()` must
     // still fail closed with a typed "no verifier wired" error, never
     // `Ok(true)`.
-    let result = envelope.verify();
+    let result = envelope.verify(&[]);
     assert!(
         !matches!(
             result,

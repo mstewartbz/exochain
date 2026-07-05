@@ -264,6 +264,14 @@ pub trait RiscZeroReceiptVerifier {
     /// Verifies a RISC Zero execution receipt against the given image id (or
     /// verifier key bytes) and the envelope's journal-binding digest.
     ///
+    /// `receipt_bytes` are the serialized risc0 `Receipt`/proof bytes the
+    /// audited verifier will decode and check (objective O-1.2): an audited
+    /// implementation deserializes them into a risc0 `Receipt` and runs its
+    /// verify path. The [`FailClosedRiscZeroVerifier`] default ignores them and
+    /// refuses unconditionally — threading the bytes here now means wiring the
+    /// audited verifier later is a small, localized change rather than a new
+    /// signature break.
+    ///
     /// `journal_digest` is [`ProofEnvelope::binding_digest`] — the canonical
     /// digest over the full envelope context (`statement_kind`,
     /// `commitment_roots`, `domain_separator`, `public_inputs`, ...). An audited
@@ -279,6 +287,7 @@ pub trait RiscZeroReceiptVerifier {
     /// `Err` — see its docs.
     fn verify_receipt(
         &self,
+        receipt_bytes: &[u8],
         image_id_or_verifier_key: &[u8],
         journal_digest: &Hash256,
     ) -> Result<bool>;
@@ -302,6 +311,7 @@ pub struct FailClosedRiscZeroVerifier;
 impl RiscZeroReceiptVerifier for FailClosedRiscZeroVerifier {
     fn verify_receipt(
         &self,
+        _receipt_bytes: &[u8],
         _image_id_or_verifier_key: &[u8],
         _journal_digest: &Hash256,
     ) -> Result<bool> {
@@ -431,17 +441,36 @@ impl ProofEnvelope {
         Ok(Hash256(*blake3::hash(&encoded).as_bytes()))
     }
 
-    /// Runs the RISC Zero seam against `verifier`, binding the full envelope
-    /// context via [`Self::binding_digest`] (objective O-1.1). Production
+    /// Runs the RISC Zero seam against `verifier`, threading the serialized
+    /// `receipt_bytes` (objective O-1.2) and binding the full envelope context
+    /// via [`Self::binding_digest`] (objective O-1.1). Production
     /// [`Self::verify`] passes [`FailClosedRiscZeroVerifier`]; tests inject a
-    /// spy to assert the binding digest actually reaches the verifier.
-    fn verify_riscz(&self, verifier: &dyn RiscZeroReceiptVerifier) -> Result<bool> {
+    /// spy to assert the receipt bytes and the binding digest actually reach
+    /// the verifier.
+    fn verify_riscz(
+        &self,
+        receipt_bytes: &[u8],
+        verifier: &dyn RiscZeroReceiptVerifier,
+    ) -> Result<bool> {
         let journal_digest = self.binding_digest()?;
-        verifier.verify_receipt(&self.verifier_key_or_image_id, &journal_digest)
+        verifier.verify_receipt(
+            receipt_bytes,
+            &self.verifier_key_or_image_id,
+            &journal_digest,
+        )
     }
 
     /// Verifies the envelope's named backend is both registered and, if
     /// unaudited, explicitly opted into.
+    ///
+    /// `receipt_bytes` are the serialized risc0 `Receipt`/proof bytes to check
+    /// (objective O-1.2). They are threaded down to the
+    /// [`RiscZeroReceiptVerifier`] seam for the [`BackendId::RiscZero`] arm so
+    /// the future audited verifier can decode and check them; the
+    /// [`FailClosedRiscZeroVerifier`] default ignores them and still refuses.
+    /// The `UnauditedBlake3Standin` and `Unknown` arms never inspect
+    /// `receipt_bytes` — for them it is simply an unused parameter — so passing
+    /// any value (including `&[]`) cannot change their fail-closed outcomes.
     ///
     /// No backend has a working, externally-reviewed verifier wired yet:
     /// the unaudited blake3 stand-in is feature-gated and still a fail-closed
@@ -471,7 +500,7 @@ impl ProofEnvelope {
     ///   this crate's own blake3 stand-in, not the RiscZero seam). The
     ///   refusal reason names pending external review, not a missing
     ///   feature opt-in.
-    pub fn verify(&self) -> Result<bool> {
+    pub fn verify(&self, receipt_bytes: &[u8]) -> Result<bool> {
         self.validate_backend()?;
 
         match self.backend_id {
@@ -500,8 +529,10 @@ impl ProofEnvelope {
                 // context (statement_kind, commitment_roots, domain_separator,
                 // ...) into the journal digest the audited verifier will check
                 // the receipt against, so it can never certify an unbound
-                // statement once wired.
-                self.verify_riscz(&FailClosedRiscZeroVerifier)
+                // statement once wired. O-1.2: receipt_bytes are threaded to
+                // the seam so the audited verifier has the serialized receipt
+                // to decode and check; the fail-closed default ignores them.
+                self.verify_riscz(receipt_bytes, &FailClosedRiscZeroVerifier)
             }
             BackendId::Unknown(_) => unreachable!(
                 "validate_backend() above must have already refused an unregistered backend id"
@@ -563,6 +594,7 @@ mod riscz_seam_binding_unit {
     impl RiscZeroReceiptVerifier for SpyVerifier {
         fn verify_receipt(
             &self,
+            _receipt_bytes: &[u8],
             _image_id_or_verifier_key: &[u8],
             journal_digest: &Hash256,
         ) -> Result<bool> {
@@ -592,7 +624,7 @@ mod riscz_seam_binding_unit {
             seen_digest: RefCell::new(None),
         };
         // Refuses (fail-closed spy), but must have received the digest.
-        let _ = env.verify_riscz(&spy);
+        let _ = env.verify_riscz(b"some-bytes", &spy);
         assert_eq!(
             *spy.seen_digest.borrow(),
             Some(env.binding_digest().expect("binding digest")),
@@ -606,13 +638,13 @@ mod riscz_seam_binding_unit {
         let spy1 = SpyVerifier {
             seen_digest: RefCell::new(None),
         };
-        let _ = env.verify_riscz(&spy1);
+        let _ = env.verify_riscz(b"receipt-bytes-a", &spy1);
 
         env.domain_separator = b"dom-CHANGED".to_vec();
         let spy2 = SpyVerifier {
             seen_digest: RefCell::new(None),
         };
-        let _ = env.verify_riscz(&spy2);
+        let _ = env.verify_riscz(b"receipt-bytes-a", &spy2);
 
         assert!(
             spy1.seen_digest.borrow().is_some(),
@@ -622,6 +654,70 @@ mod riscz_seam_binding_unit {
             *spy1.seen_digest.borrow(),
             *spy2.seen_digest.borrow(),
             "the digest reaching the verifier must change with domain_separator"
+        );
+    }
+
+    /// O-1.2(A): test-only verifier that records the `receipt_bytes` it is
+    /// handed, then STILL refuses — mirrors [`SpyVerifier`]'s discipline: a spy
+    /// must never manufacture a success-shaped result.
+    struct ReceiptBytesSpyVerifier {
+        seen_receipt_bytes: RefCell<Option<Vec<u8>>>,
+    }
+
+    impl RiscZeroReceiptVerifier for ReceiptBytesSpyVerifier {
+        fn verify_receipt(
+            &self,
+            receipt_bytes: &[u8],
+            _image_id_or_verifier_key: &[u8],
+            _journal_digest: &Hash256,
+        ) -> Result<bool> {
+            *self.seen_receipt_bytes.borrow_mut() = Some(receipt_bytes.to_vec());
+            Err(ProofError::VerificationFailed(
+                "spy verifier records the receipt bytes only; it never manufactures success"
+                    .to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn verify_riscz_passes_receipt_bytes_to_seam() {
+        let env = riscz_env();
+        let spy = ReceiptBytesSpyVerifier {
+            seen_receipt_bytes: RefCell::new(None),
+        };
+        // Refuses (fail-closed spy), but must have received the exact bytes.
+        let _ = env.verify_riscz(b"distinct-receipt-bytes", &spy);
+        assert_eq!(
+            spy.seen_receipt_bytes.borrow().as_deref(),
+            Some(b"distinct-receipt-bytes".as_slice()),
+            "the seam must hand the verifier exactly the receipt bytes it was called with"
+        );
+    }
+
+    #[test]
+    fn verify_riscz_receipt_bytes_reflect_the_argument_change() {
+        // Proves live plumbing, not a hardcoded constant: changing the bytes
+        // passed in changes what the spy records.
+        let env = riscz_env();
+
+        let spy1 = ReceiptBytesSpyVerifier {
+            seen_receipt_bytes: RefCell::new(None),
+        };
+        let _ = env.verify_riscz(b"receipt-bytes-one", &spy1);
+
+        let spy2 = ReceiptBytesSpyVerifier {
+            seen_receipt_bytes: RefCell::new(None),
+        };
+        let _ = env.verify_riscz(b"receipt-bytes-TWO", &spy2);
+
+        assert!(
+            spy1.seen_receipt_bytes.borrow().is_some(),
+            "spy1 verifier must have been called"
+        );
+        assert_ne!(
+            *spy1.seen_receipt_bytes.borrow(),
+            *spy2.seen_receipt_bytes.borrow(),
+            "the receipt bytes reaching the verifier must change with the argument passed"
         );
     }
 }
