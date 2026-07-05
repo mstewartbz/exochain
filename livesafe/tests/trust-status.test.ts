@@ -5,6 +5,50 @@ import {
   sendTrustStatusResponse
 } from "../server/utils/trust-status.js";
 
+const VERIFIED_PRODUCTION_TRUST_EVIDENCE = {
+  evidence_state: "verified" as const,
+  production_health_verified: true,
+  production_ready_verified: true,
+  root_trust_bundle_verified: true,
+  root_trust_bundle_id:
+    "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
+  root_trust_ceremony_id: "avc-exo-ceremony-2026",
+  root_trust_issuer_did:
+    "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
+  verifier_commit:
+    "379a45e1d9ab092ecd446d095a7b524570530efd",
+  verified_at: "2026-06-03T21:26:00.000Z",
+};
+
+const VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION = {
+  allowed: true,
+  responseState: "permit",
+  transportCalled: true,
+  value: {
+    schema: "livesafe.public_adapter_output_authorization.v1",
+    subject: "livesafe.ai",
+    audience: "https://livesafe.ai/api/trust/status",
+    claims: [
+      "livesafe_public_trust_status",
+      "exochain_production_evidence_verified",
+      "livesafe_runtime_adapter_verified",
+    ],
+    evidence_hash:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+    proof_id: "exo-proof:public-adapter-output:2026-07-05",
+    proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+    generated_at: "2026-07-05T11:59:00.000Z",
+    valid_from: "2026-07-05T11:55:00.000Z",
+    expires_at: "2026-07-05T12:05:00.000Z",
+    proof: {
+      type: "ed25519-public-adapter-output-authorization",
+      signature:
+        "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+  },
+};
+
 describe("trust status API contract", () => {
   it("builds an explicitly inactive machine-readable trust payload", () => {
     const payload = createTrustStatusPayload({
@@ -38,6 +82,7 @@ describe("trust status API contract", () => {
         "anchorScan",
         "anchorConsent",
         "getPaceStatus",
+        "getPublicAdapterOutputAuthorization",
       ],
       frost_genesis_complete: false,
       internal_proof_complete: false,
@@ -63,6 +108,7 @@ describe("trust status API contract", () => {
       "src/trust-signal.ts",
       "src/genesis-trust.ts",
       "server/utils/livesafe-exochain-adapter.js",
+      "server/utils/public-adapter-output-authorization.js",
       "config/exochain-production-trust.json",
       "server/utils/exochain-production-trust-evidence.js",
     ]);
@@ -108,6 +154,7 @@ describe("trust status API contract", () => {
       "anchorScan",
       "anchorConsent",
       "getPaceStatus",
+      "getPublicAdapterOutputAuthorization",
     ]);
     expect(payload.public_claims_allowed).toBe(false);
     expect(payload.public_claims_reason).toContain(
@@ -161,12 +208,12 @@ describe("trust status API contract", () => {
     ]);
   });
 
-  it("only allows verified public trust status when production evidence and runtime adapter gates pass together", () => {
+  it("denies public trust status when local runtime public_claims_allowed is true without proof-bearing adapter output", () => {
     const payload = createTrustStatusPayload({
       exochainConnected: true,
       version: "1.0.0",
-      uptimeSeconds: 16,
-      generatedAt: "2026-06-03T21:26:00.000Z",
+      uptimeSeconds: 15,
+      generatedAt: "2026-07-05T12:00:00.000Z",
       runtimeStatus: {
         adapter_state: "verified",
         surface_classification: "core-runtime-adapter",
@@ -177,20 +224,132 @@ describe("trust status API contract", () => {
           "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
         source_basis: ["server/utils/livesafe-exochain-adapter.js"],
       },
-      productionTrustEvidence: {
-        evidence_state: "verified",
-        production_health_verified: true,
-        production_ready_verified: true,
-        root_trust_bundle_verified: true,
-        root_trust_bundle_id:
-          "7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58",
-        root_trust_ceremony_id: "avc-exo-ceremony-2026",
-        root_trust_issuer_did:
-          "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
-        verifier_commit:
-          "379a45e1d9ab092ecd446d095a7b524570530efd",
-        verified_at: "2026-06-03T21:26:00.000Z",
+      productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+    });
+
+    expect(payload.state).toBe("not-verified");
+    expect(payload.machine_state).toBe("not_verified");
+    expect(payload.public_claims_allowed).toBe(false);
+    expect(payload.public_claims_reason).toContain(
+      "proof-bearing public adapter-output authorization",
+    );
+    expect(payload).not.toHaveProperty("public_adapter_output_authorization");
+  });
+
+  it("denies verified public trust status unless the public adapter-output authorization decision and DTO are complete", () => {
+    const invalidAuthorizations = [
+      {
+        name: "denied evaluator decision",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          allowed: false,
+        },
       },
+      {
+        name: "non-permit EXOCHAIN response",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          responseState: "stale",
+        },
+      },
+      {
+        name: "uncalled transport",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          transportCalled: false,
+        },
+      },
+      {
+        name: "wrong subject",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          value: {
+            ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION.value,
+            subject: "www.livesafe.ai",
+          },
+        },
+      },
+      {
+        name: "wrong audience",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          value: {
+            ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION.value,
+            audience: "https://livesafe.ai/api/health",
+          },
+        },
+      },
+      {
+        name: "forbidden claim",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          value: {
+            ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION.value,
+            claims: [
+              ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION.value.claims,
+              "medical_status_verified",
+            ],
+          },
+        },
+      },
+      {
+        name: "missing evidence hash",
+        adapterOutputAuthorization: {
+          ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+          value: {
+            ...VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION.value,
+            evidence_hash: "",
+          },
+        },
+      },
+    ];
+
+    for (const { adapterOutputAuthorization, name } of invalidAuthorizations) {
+      const payload = createTrustStatusPayload({
+        exochainConnected: true,
+        version: "1.0.0",
+        uptimeSeconds: 16,
+        generatedAt: "2026-07-05T12:00:00.000Z",
+        runtimeStatus: {
+          adapter_state: "verified",
+          surface_classification: "core-runtime-adapter",
+          public_claims_allowed: true,
+          can_read_exochain_core_state: true,
+          can_write_exochain_core_state: true,
+          disablement_path:
+            "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+          source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+        },
+        adapterOutputAuthorization,
+        productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+      });
+
+      expect(payload.public_claims_allowed, name).toBe(false);
+      expect(payload.state, name).toBe("not-verified");
+      expect(payload.public_claims_reason, name).toContain(
+        "proof-bearing public adapter-output authorization",
+      );
+    }
+  });
+
+  it("allows verified public trust status only with permit-backed proof-bearing public adapter-output authorization", () => {
+    const payload = createTrustStatusPayload({
+      exochainConnected: true,
+      version: "1.0.0",
+      uptimeSeconds: 16,
+      generatedAt: "2026-07-05T12:00:00.000Z",
+      runtimeStatus: {
+        adapter_state: "verified",
+        surface_classification: "core-runtime-adapter",
+        public_claims_allowed: true,
+        can_read_exochain_core_state: true,
+        can_write_exochain_core_state: true,
+        disablement_path:
+          "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+        source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+      },
+      adapterOutputAuthorization: VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+      productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
     });
 
     expect(payload.state).toBe("externally-verified");
@@ -198,7 +357,31 @@ describe("trust status API contract", () => {
     expect(payload.display_text).toBe("VERIFIED");
     expect(payload.public_claims_allowed).toBe(true);
     expect(payload.public_claims_reason).toContain(
-      "EXOCHAIN production evidence and LiveSafe runtime adapter gates are verified",
+      "EXOCHAIN production evidence, LiveSafe runtime adapter gates, and proof-bearing public adapter-output authorization are verified",
+    );
+    expect(payload.public_adapter_output_authorization).toEqual({
+      schema: "livesafe.public_adapter_output_authorization.v1",
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      claims: [
+        "livesafe_public_trust_status",
+        "exochain_production_evidence_verified",
+        "livesafe_runtime_adapter_verified",
+      ],
+      evidence_hash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+      proof_id: "exo-proof:public-adapter-output:2026-07-05",
+      proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+      generated_at: "2026-07-05T11:59:00.000Z",
+      valid_from: "2026-07-05T11:55:00.000Z",
+      expires_at: "2026-07-05T12:05:00.000Z",
+      proof_type: "ed25519-public-adapter-output-authorization",
+      response_state: "permit",
+      transport_called: true,
+    });
+    expect(JSON.stringify(payload.public_adapter_output_authorization)).not.toContain(
+      "signature",
     );
   });
 

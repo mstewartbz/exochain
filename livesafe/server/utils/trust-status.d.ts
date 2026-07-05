@@ -25,6 +25,12 @@ export interface TrustStatusPayloadOptions {
     disablement_path: string;
     source_basis: string[];
   };
+  adapterOutputAuthorization?: {
+    allowed: boolean;
+    responseState: string;
+    transportCalled: boolean;
+    value: unknown;
+  };
   productionTrustEvidence?: {
     evidence_state: "verified" | "blocked";
     production_health_verified: boolean;
@@ -83,6 +89,22 @@ export interface TrustStatusPayload {
   frost_genesis_complete: boolean;
   public_claims_allowed: boolean;
   public_claims_reason: string;
+  public_adapter_output_authorization?: {
+    schema: "livesafe.public_adapter_output_authorization.v1";
+    subject: "livesafe.ai";
+    audience: "https://livesafe.ai/api/trust/status";
+    claims: string[];
+    evidence_hash: string;
+    receipt_id: string;
+    proof_id: string;
+    proof_ref: string;
+    generated_at: string;
+    valid_from: string;
+    expires_at: string;
+    proof_type: string;
+    response_state: "permit";
+    transport_called: true;
+  };
   source_basis: string[];
   version: string;
   uptime_seconds: number;

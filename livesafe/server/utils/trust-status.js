@@ -4,13 +4,19 @@ const { runtimeExochainAdapter } = require("./livesafe-exochain-adapter");
 const {
   exochainProductionTrustEvidence,
 } = require("./exochain-production-trust-evidence");
+const {
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+  evaluatePublicAdapterOutputAuthorization,
+} = require("./public-adapter-output-authorization");
 
 const SOURCE_BASIS = [
   "docs/context/LIVESAFE_PRODUCTION_TRUST_ACTIVATION_GATES.md",
   "docs/context/LIVESAFE_TRUST_SIGNAL_VISUAL_LANGUAGE.md",
   "src/trust-signal.ts",
   "src/genesis-trust.ts",
-  "server/utils/livesafe-exochain-adapter.js"
+  "server/utils/livesafe-exochain-adapter.js",
+  "server/utils/public-adapter-output-authorization.js"
 ];
 
 const NOT_VERIFIED_TOKEN = {
@@ -48,6 +54,7 @@ function publicClaimsReason({
   productionEvidenceVerified,
   runtimeAdapterVerified,
   runtimePublicClaimsAllowed,
+  publicAdapterOutputAuthorized,
 }) {
   if (!productionEvidenceVerified) {
     return "Public trust claims remain inactive until EXOCHAIN production evidence verifies.";
@@ -61,7 +68,11 @@ function publicClaimsReason({
     return "Public trust claims remain inactive because the LiveSafe runtime adapter has not allowed public trust output.";
   }
 
-  return "EXOCHAIN production evidence and LiveSafe runtime adapter gates are verified.";
+  if (!publicAdapterOutputAuthorized) {
+    return "Public trust claims remain inactive because proof-bearing public adapter-output authorization has not been verified.";
+  }
+
+  return "EXOCHAIN production evidence, LiveSafe runtime adapter gates, and proof-bearing public adapter-output authorization are verified.";
 }
 
 function createTrustStatusPayload({
@@ -70,6 +81,7 @@ function createTrustStatusPayload({
   uptimeSeconds,
   generatedAt,
   runtimeStatus,
+  adapterOutputAuthorization,
   productionTrustEvidence
 }) {
   const defaultRuntimeStatus = runtimeExochainAdapter.getRuntimeStatus();
@@ -91,13 +103,21 @@ function createTrustStatusPayload({
   );
   const runtimePublicClaimsAllowed =
     resolvedRuntimeStatus.public_claims_allowed === true;
+  const publicAdapterOutputAuthorizationDecision =
+    evaluatePublicAdapterOutputAuthorization(adapterOutputAuthorization, {
+      currentAt: generatedAt,
+      subject: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+      audience: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+    });
+  const publicAdapterOutputAuthorized =
+    publicAdapterOutputAuthorizationDecision.allowed === true;
   const publicClaimsAllowed =
     productionEvidenceVerified &&
     runtimeAdapterVerified &&
-    runtimePublicClaimsAllowed;
+    runtimePublicClaimsAllowed &&
+    publicAdapterOutputAuthorized;
   const trustToken = publicClaimsAllowed ? VERIFIED_TOKEN : NOT_VERIFIED_TOKEN;
-
-  return {
+  const payload = {
     ...trustToken,
     api_surface: "api-response",
     exochain_connected: Boolean(exochainConnected),
@@ -135,6 +155,7 @@ function createTrustStatusPayload({
       productionEvidenceVerified,
       runtimeAdapterVerified,
       runtimePublicClaimsAllowed,
+      publicAdapterOutputAuthorized,
     }),
     source_basis: [
       ...SOURCE_BASIS,
@@ -145,6 +166,13 @@ function createTrustStatusPayload({
     uptime_seconds: uptimeSeconds,
     generated_at: generatedAt ?? new Date().toISOString()
   };
+
+  if (publicClaimsAllowed) {
+    payload.public_adapter_output_authorization =
+      publicAdapterOutputAuthorizationDecision.metadata;
+  }
+
+  return payload;
 }
 
 function sendTrustStatusResponse(_req, res, options) {

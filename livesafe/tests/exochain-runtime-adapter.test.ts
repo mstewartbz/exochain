@@ -5,6 +5,30 @@ const {
   executeRuntimeExochainOperation,
 } = require("../server/utils/livesafe-exochain-adapter.js");
 
+const PUBLIC_ADAPTER_AUTHORIZATION_DTO = {
+  schema: "livesafe.public_adapter_output_authorization.v1",
+  subject: "livesafe.ai",
+  audience: "https://livesafe.ai/api/trust/status",
+  claims: [
+    "livesafe_public_trust_status",
+    "exochain_production_evidence_verified",
+    "livesafe_runtime_adapter_verified",
+  ],
+  evidence_hash:
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+  proof_id: "exo-proof:public-adapter-output:2026-07-05",
+  proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+  generated_at: "2026-07-05T11:59:00.000Z",
+  valid_from: "2026-07-05T11:55:00.000Z",
+  expires_at: "2026-07-05T12:05:00.000Z",
+  proof: {
+    type: "ed25519-public-adapter-output-authorization",
+    signature:
+      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+};
+
 describe("LiveSafe EXOCHAIN runtime adapter facade", () => {
   it("fails closed without calling the transport when the adapter is not wired", async () => {
     const transport = vi.fn(async () => ({ state: "permit", value: { ok: true } }));
@@ -163,6 +187,7 @@ describe("LiveSafe EXOCHAIN runtime adapter facade", () => {
         "anchorScan",
         "anchorConsent",
         "getPaceStatus",
+        "getPublicAdapterOutputAuthorization",
       ],
     });
     expect(adapter.getRuntimeStatus().disablement_path).toContain(
@@ -514,5 +539,121 @@ describe("LiveSafe EXOCHAIN runtime adapter facade", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.transportCalled).toBe(false);
     expect(decision.responseState).toBe("not-called");
+  });
+
+  it("fails closed for public adapter-output authorization when the adapter is not wired", async () => {
+    const getPublicAdapterOutputAuthorization = vi.fn(async () => ({
+      state: "permit",
+      value: PUBLIC_ADAPTER_AUTHORIZATION_DTO,
+    }));
+    const adapter = createRuntimeExochainAdapter({
+      adapterStatus: "not-wired",
+      client: { getPublicAdapterOutputAuthorization },
+    });
+
+    const decision = await adapter.getPublicAdapterOutputAuthorization({
+      currentAt: "2026-07-05T12:00:00.000Z",
+      returnDecision: true,
+    });
+
+    expect(getPublicAdapterOutputAuthorization).not.toHaveBeenCalled();
+    expect(decision.allowed).toBe(false);
+    expect(decision.transportCalled).toBe(false);
+    expect(decision.responseState).toBe("not-called");
+    expect(decision.reasons).toContain(
+      "Adapter activation requires a wired EXOCHAIN dependency surface.",
+    );
+  });
+
+  it("fails closed for denied public adapter-output authorization transport states", async () => {
+    for (const responseState of [
+      "deny",
+      "rejected",
+      "timeout",
+      "unavailable",
+      "stale",
+      "revoked",
+      "contradicted",
+    ] as const) {
+      const getPublicAdapterOutputAuthorization = vi.fn(async () => ({
+        state: responseState,
+        value: PUBLIC_ADAPTER_AUTHORIZATION_DTO,
+      }));
+      const adapter = createRuntimeExochainAdapter({
+        adapterStatus: "verified",
+        client: { getPublicAdapterOutputAuthorization },
+      });
+
+      const decision = await adapter.getPublicAdapterOutputAuthorization({
+        currentAt: "2026-07-05T12:00:00.000Z",
+        returnDecision: true,
+      });
+
+      expect(getPublicAdapterOutputAuthorization).toHaveBeenCalledWith({
+        subject: "livesafe.ai",
+        audience: "https://livesafe.ai/api/trust/status",
+      });
+      expect(decision.allowed, responseState).toBe(false);
+      expect(decision.transportCalled, responseState).toBe(true);
+      expect(decision.responseState, responseState).toBe(responseState);
+    }
+  });
+
+  it("fails closed for malformed public adapter-output authorization DTOs", async () => {
+    const getPublicAdapterOutputAuthorization = vi.fn(async () => ({
+      state: "permit",
+      value: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_DTO,
+        subject: "www.livesafe.ai",
+      },
+    }));
+    const adapter = createRuntimeExochainAdapter({
+      adapterStatus: "verified",
+      client: { getPublicAdapterOutputAuthorization },
+    });
+
+    const decision = await adapter.getPublicAdapterOutputAuthorization({
+      currentAt: "2026-07-05T12:00:00.000Z",
+      returnDecision: true,
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.transportCalled).toBe(true);
+    expect(decision.responseState).toBe("permit");
+    expect(decision.reasons).toContain(
+      "Public adapter-output authorization subject must be livesafe.ai.",
+    );
+  });
+
+  it("succeeds for public adapter-output authorization only with permit plus evaluator pass", async () => {
+    const getPublicAdapterOutputAuthorization = vi.fn(async () => ({
+      state: "permit",
+      value: PUBLIC_ADAPTER_AUTHORIZATION_DTO,
+    }));
+    const adapter = createRuntimeExochainAdapter({
+      adapterStatus: "verified",
+      client: { getPublicAdapterOutputAuthorization },
+    });
+
+    const decision = await adapter.getPublicAdapterOutputAuthorization({
+      currentAt: "2026-07-05T12:00:00.000Z",
+      returnDecision: true,
+    });
+
+    expect(decision.allowed).toBe(true);
+    expect(decision.transportCalled).toBe(true);
+    expect(decision.responseState).toBe("permit");
+    expect(decision.metadata).toMatchObject({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      evidence_hash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+      proof_id: "exo-proof:public-adapter-output:2026-07-05",
+      proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+      response_state: "permit",
+      transport_called: true,
+    });
+    expect(JSON.stringify(decision)).not.toContain("signature");
   });
 });
