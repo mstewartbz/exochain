@@ -26,9 +26,101 @@ const PUBLIC_ADAPTER_AUTHORIZATION_DTO = {
   },
 };
 
+const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
+  EXOCHAIN_NODE_URL: "https://exo-node.example",
+  EXOCHAIN_NODE_AVC_URL: "",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER:
+    "secret-public-adapter-bearer",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID:
+    "credential:livesafe-public-adapter-output",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH:
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY:
+    "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT: "2026-07-05T12:05:00.000Z",
+  EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS: "2500",
+};
+
+const PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE = {
+  envelope_schema:
+    "exochain.avc.livesafe.public_adapter_output_authorization_envelope.v1",
+  status: "authorized",
+  subject: "livesafe.ai",
+  audience: "https://livesafe.ai/api/trust/status",
+  domain: "livesafe.ai",
+  claims: [
+    "livesafe_public_trust_status",
+    "exochain_production_evidence_verified",
+    "livesafe_runtime_adapter_verified",
+  ],
+  evidence_hash:
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  receipt: {
+    id: "exo-receipt:public-adapter-output:2026-07-05",
+  },
+  proof: {
+    id: "exo-proof:public-adapter-output:2026-07-05",
+    ref: "exo://receipts/public-adapter-output/2026-07-05",
+    type: "ed25519-public-adapter-output-authorization",
+    signature:
+      "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+  issued_at: {
+    physical_ms: Date.parse("2026-07-05T11:59:00.000Z"),
+    logical: 3,
+  },
+  valid_from: {
+    physical_ms: Date.parse("2026-07-05T11:55:00.000Z"),
+    logical: 0,
+  },
+  expires_at: "2026-07-05T12:05:00.000Z",
+};
+
+const PUBLIC_ADAPTER_AUTHORIZATION_ENV_KEYS = Object.keys(
+  PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG,
+);
+
+const savedPublicAdapterAuthorizationEnv = Object.fromEntries(
+  PUBLIC_ADAPTER_AUTHORIZATION_ENV_KEYS.map((key) => [key, process.env[key]]),
+);
+
+function restorePublicAdapterAuthorizationEnv() {
+  for (const key of PUBLIC_ADAPTER_AUTHORIZATION_ENV_KEYS) {
+    const value = savedPublicAdapterAuthorizationEnv[key];
+
+    if (typeof value === "undefined") {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function clearPublicAdapterAuthorizationEnv() {
+  for (const key of PUBLIC_ADAPTER_AUTHORIZATION_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+function configurePublicAdapterAuthorizationEnv(
+  overrides: Partial<typeof PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG> = {},
+) {
+  clearPublicAdapterAuthorizationEnv();
+  for (const [key, value] of Object.entries({
+    ...PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG,
+    ...overrides,
+  })) {
+    if (value) {
+      process.env[key] = value;
+    }
+  }
+}
+
 describe("EXOCHAIN client timestamp preservation", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    restorePublicAdapterAuthorizationEnv();
   });
 
   it.each([
@@ -401,84 +493,216 @@ describe("EXOCHAIN client timestamp preservation", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("fails closed before query when public adapter-output authorization subject or audience is not exact", async () => {
-    for (const input of [
-      {
-        subject: "www.livesafe.ai",
-        audience: "https://livesafe.ai/api/trust/status",
-      },
-      {
-        subject: "livesafe.ai",
-        audience: "https://livesafe.ai/api/health",
-      },
-    ]) {
-      const client = new ExochainClient("http://example.invalid/graphql");
-      const query = vi.spyOn(client, "query").mockResolvedValue({
-        data: {
-          livesafe_public_adapter_output_authorization:
-            PUBLIC_ADAPTER_AUTHORIZATION_DTO,
-        },
-      });
-
-      const result = await client.getPublicAdapterOutputAuthorization(input);
-
-      expect(result).toEqual({ state: "rejected", value: null });
-      expect(query).not.toHaveBeenCalled();
-    }
-  });
-
-  it("requests public adapter-output authorization through a narrow GraphQL operation", async () => {
-    const client = new ExochainClient("http://example.invalid/graphql");
+  it("fails closed without explicit node authorization configuration and never falls back to GraphQL", async () => {
+    clearPublicAdapterAuthorizationEnv();
+    const client = new ExochainClient("http://graphql.example/graphql");
     const query = vi.spyOn(client, "query").mockResolvedValue({
       data: {
         livesafe_public_adapter_output_authorization:
           PUBLIC_ADAPTER_AUTHORIZATION_DTO,
       },
     });
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
 
     const result = await client.getPublicAdapterOutputAuthorization({
       subject: "livesafe.ai",
       audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+
+    expect(result).toEqual({ state: "unavailable", value: null });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before REST transport when public adapter-output authorization subject or audience is not exact", async () => {
+    configurePublicAdapterAuthorizationEnv();
+
+    for (const input of [
+      {
+        subject: "www.livesafe.ai",
+        audience: "https://livesafe.ai/api/trust/status",
+        currentAt: "2026-07-05T12:00:00.000Z",
+      },
+      {
+        subject: "livesafe.ai",
+        audience: "https://livesafe.ai/api/health",
+        currentAt: "2026-07-05T12:00:00.000Z",
+      },
+    ]) {
+      const client = new ExochainClient("http://example.invalid/graphql");
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+
+      const result = await client.getPublicAdapterOutputAuthorization(input);
+
+      expect(result).toEqual({ state: "rejected", value: null });
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("posts public adapter-output authorization to the configured EXOCHAIN node REST route", async () => {
+    configurePublicAdapterAuthorizationEnv();
+    const client = new ExochainClient("http://example.invalid/graphql");
+    const query = vi.spyOn(client, "query");
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+    }));
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
     });
 
     expect(result).toEqual({
       state: "permit",
-      value: PUBLIC_ADAPTER_AUTHORIZATION_DTO,
-    });
-    expect(query).toHaveBeenCalledWith(
-      "GetPublicAdapterOutputAuthorization",
-      expect.stringContaining("livesafe_public_adapter_output_authorization"),
-      {
-        input: {
-          subject: "livesafe.ai",
-          audience: "https://livesafe.ai/api/trust/status",
+      value: {
+        schema: "livesafe.public_adapter_output_authorization.v1",
+        subject: "livesafe.ai",
+        audience: "https://livesafe.ai/api/trust/status",
+        claims: [
+          "livesafe_public_trust_status",
+          "exochain_production_evidence_verified",
+          "livesafe_runtime_adapter_verified",
+        ],
+        evidence_hash:
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+        proof_id: "exo-proof:public-adapter-output:2026-07-05",
+        proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+        generated_at: "2026-07-05T11:59:00.000Z",
+        valid_from: "2026-07-05T11:55:00.000Z",
+        expires_at: "2026-07-05T12:05:00.000Z",
+        proof: {
+          type: "ed25519-public-adapter-output-authorization",
+          signature:
+            "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         },
       },
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://exo-node.example/api/v1/avc/livesafe/public-adapter-output-authorization",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer secret-public-adapter-bearer",
+        },
+        body: expect.any(String),
+        signal: expect.any(Object),
+      }),
     );
-    const queryDocument = query.mock.calls[0]?.[1] || "";
-    expect(queryDocument).toContain("evidence_hash");
-    expect(queryDocument).toContain("proof_id");
-    expect(queryDocument).toContain("proof_ref");
-    expect(queryDocument).not.toContain("bearer_token");
-    expect(queryDocument).not.toContain("private_key");
-    expect(queryDocument).not.toContain("raw_authority_chain");
+    const [, requestInit] = fetch.mock.calls[0] as unknown as [
+      string,
+      { body: string },
+    ];
+    const requestBody = JSON.parse(requestInit.body);
+    expect(requestBody).toEqual({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      credential_id: "credential:livesafe-public-adapter-output",
+      evidence_hash:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      idempotency_key: "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
+      expires_at: "2026-07-05T12:05:00.000Z",
+    });
+    expect(requestBody).not.toHaveProperty("issued_at");
+    expect(requestBody).not.toHaveProperty("generated_at");
+    expect(query).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("secret-public-adapter-bearer");
   });
 
-  it("redacts public adapter-output authorization gateway errors and fails closed", async () => {
-    const client = new ExochainClient("http://example.invalid/graphql");
-    vi.spyOn(client, "query").mockResolvedValue({
-      data: null,
-      errors: [
-        {
-          message: "Bearer secret-production-token private_key=raw-key",
-        },
-      ],
+  it("uses EXOCHAIN_NODE_AVC_URL when the AVC route has a dedicated base URL", async () => {
+    configurePublicAdapterAuthorizationEnv({
+      EXOCHAIN_NODE_AVC_URL: "https://exo-avc.example/custom-avc-root",
     });
+    const client = new ExochainClient("http://example.invalid/graphql");
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+    }));
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+
+    expect(result.state).toBe("permit");
+    const [requestUrl] = fetch.mock.calls[0] as unknown as [string, unknown];
+    expect(requestUrl).toBe(
+      "https://exo-avc.example/custom-avc-root/api/v1/avc/livesafe/public-adapter-output-authorization",
+    );
+  });
+
+  it("adapts a core public adapter-output authorization envelope into the LiveSafe DTO shape", async () => {
+    configurePublicAdapterAuthorizationEnv();
+    const client = new ExochainClient("http://example.invalid/graphql");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+      })),
+    );
+
+    const result = await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+
+    expect(result).toEqual({
+      state: "permit",
+      value: {
+        schema: "livesafe.public_adapter_output_authorization.v1",
+        subject: "livesafe.ai",
+        audience: "https://livesafe.ai/api/trust/status",
+        claims: [
+          "livesafe_public_trust_status",
+          "exochain_production_evidence_verified",
+          "livesafe_runtime_adapter_verified",
+        ],
+        evidence_hash:
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+        proof_id: "exo-proof:public-adapter-output:2026-07-05",
+        proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+        generated_at: "2026-07-05T11:59:00.000Z",
+        valid_from: "2026-07-05T11:55:00.000Z",
+        expires_at: "2026-07-05T12:05:00.000Z",
+        proof: {
+          type: "ed25519-public-adapter-output-authorization",
+          signature:
+            "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      },
+    });
+  });
+
+  it("redacts public adapter-output authorization REST errors and fails closed", async () => {
+    configurePublicAdapterAuthorizationEnv();
+    const client = new ExochainClient("http://example.invalid/graphql");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 403,
+        text: async () => "Bearer secret-production-token private_key=raw-key",
+      })),
+    );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const result = await client.getPublicAdapterOutputAuthorization({
       subject: "livesafe.ai",
       audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
     });
 
     expect(result).toEqual({ state: "rejected", value: null });
@@ -488,34 +712,168 @@ describe("EXOCHAIN client timestamp preservation", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain("raw-key");
   });
 
-  it("fails closed when public adapter-output authorization response is malformed or unavailable", async () => {
-    const malformedClient = new ExochainClient("http://example.invalid/graphql");
-    vi.spyOn(malformedClient, "query").mockResolvedValue({
-      data: {
-        livesafe_public_adapter_output_authorization: {
-          ...PUBLIC_ADAPTER_AUTHORIZATION_DTO,
-          proof_id: "",
+  it.each([
+    {
+      label: "wrong schema",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        envelope_schema:
+          "exochain.avc.livesafe.public_adapter_output_authorization_envelope.v0",
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "wrong subject",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        subject: "www.livesafe.ai",
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "wrong audience",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        audience: "https://livesafe.ai/api/health",
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "wrong domain",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        domain: "www.livesafe.ai",
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "expired",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        expires_at: "2026-07-05T11:59:59.999Z",
+      },
+      expectedState: "stale",
+    },
+    {
+      label: "not yet valid",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        valid_from: "2026-07-05T12:00:01.000Z",
+      },
+      expectedState: "stale",
+    },
+    {
+      label: "stale issued_at",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        issued_at: "2026-07-05T11:54:59.999Z",
+      },
+      expectedState: "stale",
+    },
+    {
+      label: "revoked status",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        status: "revoked",
+      },
+      expectedState: "revoked",
+    },
+    {
+      label: "missing receipt",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        receipt: null,
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "missing proof id",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        proof: {
+          ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE.proof,
+          id: "",
         },
       },
-    });
-    const unavailableClient = new ExochainClient("http://example.invalid/graphql");
-    vi.spyOn(unavailableClient, "query").mockRejectedValue(
-      Object.assign(new Error("Bearer secret-production-token ETIMEDOUT"), {
-        code: "ETIMEDOUT",
-      }),
+      expectedState: "rejected",
+    },
+    {
+      label: "missing signature",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        proof: {
+          ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE.proof,
+          signature: "",
+        },
+      },
+      expectedState: "rejected",
+    },
+    {
+      label: "raw sensitive field",
+      envelope: {
+        ...PUBLIC_ADAPTER_AUTHORIZATION_CORE_ENVELOPE,
+        bearer_token: "Bearer secret-production-token",
+      },
+      expectedState: "rejected",
+    },
+  ])("fails closed when public adapter-output authorization REST envelope is $label", async ({
+    envelope,
+    expectedState,
+  }) => {
+    configurePublicAdapterAuthorizationEnv();
+    const malformedClient = new ExochainClient("http://example.invalid/graphql");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => envelope,
+      })),
     );
 
     await expect(
       malformedClient.getPublicAdapterOutputAuthorization({
         subject: "livesafe.ai",
         audience: "https://livesafe.ai/api/trust/status",
+        currentAt: "2026-07-05T12:00:00.000Z",
       }),
-    ).resolves.toEqual({ state: "rejected", value: null });
+    ).resolves.toEqual({ state: expectedState, value: null });
+  });
+
+  it("fails closed when public adapter-output authorization transport times out or is unavailable", async () => {
+    configurePublicAdapterAuthorizationEnv();
+    const unavailableClient = new ExochainClient("http://example.invalid/graphql");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValueOnce(
+        Object.assign(new Error("Bearer secret-production-token ETIMEDOUT"), {
+          name: "AbortError",
+        }),
+      ),
+    );
+
     await expect(
       unavailableClient.getPublicAdapterOutputAuthorization({
         subject: "livesafe.ai",
         audience: "https://livesafe.ai/api/trust/status",
+        currentAt: "2026-07-05T12:00:00.000Z",
       }),
     ).resolves.toEqual({ state: "timeout", value: null });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValueOnce(
+        Object.assign(new Error("Bearer secret-production-token ETIMEDOUT"), {
+          code: "ECONNREFUSED",
+        }),
+      ),
+    );
+
+    await expect(
+      unavailableClient.getPublicAdapterOutputAuthorization({
+        subject: "livesafe.ai",
+        audience: "https://livesafe.ai/api/trust/status",
+        currentAt: "2026-07-05T12:00:00.000Z",
+      }),
+    ).resolves.toEqual({ state: "unavailable", value: null });
   });
 });

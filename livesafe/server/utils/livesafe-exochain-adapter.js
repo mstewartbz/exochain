@@ -281,6 +281,7 @@ function createRuntimeExochainAdapter({
         client.getPublicAdapterOutputAuthorization({
           subject,
           audience,
+          currentAt,
         }),
     );
     const evaluation = evaluatePublicAdapterOutputAuthorization(

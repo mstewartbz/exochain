@@ -592,6 +592,7 @@ describe("LiveSafe EXOCHAIN runtime adapter facade", () => {
       expect(getPublicAdapterOutputAuthorization).toHaveBeenCalledWith({
         subject: "livesafe.ai",
         audience: "https://livesafe.ai/api/trust/status",
+        currentAt: "2026-07-05T12:00:00.000Z",
       });
       expect(decision.allowed, responseState).toBe(false);
       expect(decision.transportCalled, responseState).toBe(true);
