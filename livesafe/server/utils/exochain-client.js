@@ -319,6 +319,10 @@ function publicAuthorizationRevocationState(revocationStatus) {
     return 'rejected';
   }
 
+  if (revocationStatus === 'NotRevoked') {
+    return 'active';
+  }
+
   const normalized = revocationStatus
     .trim()
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -329,20 +333,11 @@ function publicAuthorizationRevocationState(revocationStatus) {
     return 'revoked';
   }
 
-  if (
-    normalized === 'active' ||
-    normalized === 'valid' ||
-    normalized === 'not_revoked' ||
-    normalized === 'non_revoked'
-  ) {
-    return 'active';
-  }
-
   return 'rejected';
 }
 
 function isValidSchemaVersion(value) {
-  return Number.isInteger(value) && value > 0 && value <= 65535;
+  return value === 1;
 }
 
 function adaptCorePublicAdapterOutputAuthorizationEnvelope(

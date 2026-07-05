@@ -775,6 +775,16 @@ describe("EXOCHAIN client timestamp preservation", () => {
       expectedState: "rejected",
     },
     {
+      label: "top-level schema_version 2",
+      envelope: rustCoreEnvelope({ envelope: { schema_version: 2 } }),
+      expectedState: "rejected",
+    },
+    {
+      label: "nested proof schema_version 2",
+      envelope: rustCoreEnvelope({ proof: { schema_version: 2 } }),
+      expectedState: "rejected",
+    },
+    {
       label: "missing top-level domain",
       envelope: rustCoreEnvelope({ envelope: { domain: "" } }),
       expectedState: "rejected",
@@ -881,6 +891,21 @@ describe("EXOCHAIN client timestamp preservation", () => {
       label: "revoked revocation_status",
       envelope: rustCoreEnvelope({ proof: { revocation_status: "revoked" } }),
       expectedState: "revoked",
+    },
+    {
+      label: "non-canonical valid revocation_status",
+      envelope: rustCoreEnvelope({ proof: { revocation_status: "valid" } }),
+      expectedState: "rejected",
+    },
+    {
+      label: "non-canonical active revocation_status",
+      envelope: rustCoreEnvelope({ proof: { revocation_status: "active" } }),
+      expectedState: "rejected",
+    },
+    {
+      label: "non-canonical non-revoked revocation_status",
+      envelope: rustCoreEnvelope({ proof: { revocation_status: "non-revoked" } }),
+      expectedState: "rejected",
     },
     {
       label: "missing receipt_id",
