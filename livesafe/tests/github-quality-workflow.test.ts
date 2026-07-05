@@ -14,8 +14,18 @@ describe("GitHub quality workflow", () => {
     const qualityIndex = workflow.indexOf("run: npm run quality");
 
     expect(workflow).toContain("livesafe/**");
+    expect(workflow).toContain("workflow_call:");
+    expect(workflow).toContain("commit_sha:");
+    expect(workflow).toContain("permissions:");
+    expect(workflow).toContain("contents: read");
+    expect(workflow).toContain("ref: ${{ inputs.commit_sha || github.sha }}");
     expect(rootInstallIndex).toBeGreaterThanOrEqual(0);
     expect(serverInstallIndex).toBeGreaterThan(rootInstallIndex);
     expect(qualityIndex).toBeGreaterThan(serverInstallIndex);
+    expect(workflow).toContain(
+      "docker build -f livesafe/Dockerfile livesafe",
+    );
+    expect(workflow).not.toContain("RAILWAY_TOKEN");
+    expect(workflow).not.toContain("railway up");
   });
 });

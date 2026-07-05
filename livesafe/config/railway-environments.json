@@ -1,0 +1,39 @@
+{
+  "projectId": "372de75b-5f44-46c2-ab70-3c3185b5d81e",
+  "workspace": "ARMORCLOUD",
+  "environments": [
+    {
+      "id": "3dc06fb6-c3df-4fe4-8807-0da0e62e4028",
+      "livesafeDomain": "https://livesafe-development.up.railway.app",
+      "name": "development"
+    },
+    {
+      "id": "a223bc12-fbe4-430f-abce-8e3ee7c9abd3",
+      "livesafeDomain": "https://livesafe-staging.up.railway.app",
+      "name": "staging"
+    },
+    {
+      "id": "1e5153e1-15f4-4447-bf7c-029af33927fb",
+      "name": "production"
+    }
+  ],
+  "services": [
+    {
+      "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+      "name": "livesafe"
+    },
+    {
+      "id": "4d8384d3-be5d-48d6-a914-97eb6133e53d",
+      "name": "exochain-node"
+    },
+    {
+      "id": "2ab3f445-d6f7-4245-940c-985a14e974f9",
+      "name": "exochain-node-db"
+    },
+    {
+      "id": "691122bb-025b-463d-8033-7f94f7678748",
+      "name": "Postgres"
+    }
+  ],
+  "productionDomain": "https://livesafe.ai"
+}
