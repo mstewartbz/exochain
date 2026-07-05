@@ -640,6 +640,21 @@ async fn handle_validator_change(
                 }
             }
             "remove" => {
+                // Fast-fail UX pre-check ONLY — not the safety boundary.
+                // This rejects an obviously-doomed proposal early (before
+                // spending a round on it) by checking the *current* live
+                // validator count at submission time. It cannot prevent two
+                // concurrent `RemoveValidator` proposals from each passing
+                // this check (each sees the count still above the floor
+                // when it submits) and both reaching quorum, which would
+                // jointly drop the set below the BFT floor if nothing else
+                // caught it. The authoritative, race-proof invariant lives
+                // at apply-on-commit time in
+                // `reactor::apply_committed_validator_change_in_memory`'s
+                // `RemoveValidator` arm (W3(A)/R1.5), which re-checks the
+                // floor inside the same lock as the mutation and refuses
+                // any commit that would breach it — regardless of caller,
+                // and regardless of what this pre-check saw.
                 let validator_count = read_validator_count(Arc::clone(&api.reactor_state)).await?;
                 if validator_count <= 4 {
                     return Err((
