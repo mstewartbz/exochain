@@ -678,8 +678,11 @@ delivered; row STAYS Red):
   row green needs both halves.
 - Status is Red-with-reason (R1.2) until the objectives are met — the ledger
   functioning, not failing. Hardening (R1.5) executes under W3: push the BFT min-4
-  floor into the validate layer, coordinated with the VCG-014 concurrent-remove race
-  so it lands once. Decision resolved — no longer awaiting the principal.
+  floor into the validate layer. The concurrent-remove race this note used to
+  cross-reference as "VCG-014" is a VCG-005 residual, not a VCG-014 one (see the
+  correction in the VCG-005 lane record) — closed by W3(A)/R1.5's apply-time
+  floor check in `reactor.rs`, coordinate with that fix rather than VCG-014 so
+  it lands once. Decision resolved — no longer awaiting the principal.
 
 Lane record (2026-07-02, branch `vcg/004a-cgr-lock-and-reclass`, sub-lane
 VCG-004a):
@@ -813,12 +816,28 @@ Lane record (2026-07-03, branch `vcg/005-validator-set-lifecycle`):
   reach quorum and jointly drop the live set below `BFT_MIN_VALIDATORS`
   because the floor is checked at proposal-submission time only (api.rs,
   untouched), not at commit-application time. Recorded for a follow-on design
-  decision (proposal vs vote vs commit-application gating); tracked under
-  VCG-014 governance-completeness scope.
+  decision (proposal vs vote vs commit-application gating).
+- Correction (2026-07-04): the concurrent-remove residual above was
+  previously cross-referenced to "VCG-014 governance-completeness scope."
+  That was a mislabel — VCG-014's delivered lane is the CR-001
+  legal-completeness drift-guard (`tools/test_cr001_completeness.sh`), which
+  has no runtime mechanism touching validator-set application and never
+  claimed to. The concurrent-remove race is closed instead under W3(A)/R1.5
+  (branch `vcg/w3a-bft-floor-apply-time`): the BFT min-4 floor is now
+  re-checked inside `apply_committed_validator_change_in_memory`'s
+  `RemoveValidator` arm, at apply-on-commit time, inside the same
+  `with_reactor_state_blocking` critical section as the mutation itself —
+  the existing single `Mutex<ReactorState>` lock discipline this module
+  already documents is what serializes the two concurrent apply tasks, so
+  no new lock, queue, or VCG-014-style guard mechanism was needed. Covered
+  by `remove_validator_at_floor_refused_at_apply_time_even_bypassing_http_handler`
+  and `concurrent_removals_cannot_drop_validator_set_below_floor` in
+  `reactor.rs`.
 - Status Green-local: the core lifecycle (committed ValidatorChange mutates and
   persists live state with an audit receipt) is delivered and tested; the
   admin-bearer authority surface (issue #737) is a separate lane (VCG-006);
-  the placeholder-key liveness gap is VCG-015. Closed after merge + CI.
+  the placeholder-key liveness gap is VCG-015; the concurrent-remove race is
+  closed per the correction above. Closed after merge + CI.
 
 Evidence:
 

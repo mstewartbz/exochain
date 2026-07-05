@@ -188,6 +188,41 @@ fn apply_committed_validator_change_in_memory(
             s.validator_public_keys = ValidatorPublicKeys::new(keys);
         }
         ValidatorChange::RemoveValidator { did } => {
+            // W3(A)/R1.5: BFT min-4 validator floor, enforced HERE at
+            // apply-on-commit time — not just at api.rs's propose-time
+            // pre-check (`validator_count <= 4` in
+            // `handle_validator_change`), which only fast-fails the UX for
+            // a single proposer and is not the safety boundary. Two
+            // `RemoveValidator` proposals can each individually pass that
+            // pre-check (each sees the count still at or above the floor
+            // when submitted) and both reach quorum; applied sequentially
+            // through the same lock with no re-check here, the set would
+            // drop 5 -> 4 -> 3, one below the 3f+1=4 safety floor. This
+            // whole match arm already runs inside the single
+            // `with_reactor_state_blocking` critical section entered via
+            // the `Mutex<ReactorState>`, so the two concurrent apply tasks
+            // are serialized: whichever runs second observes the
+            // already-decremented count below and refuses here, closing
+            // the race without needing any new lock or coordination
+            // mechanism.
+            //
+            // `BFT_MIN_VALIDATORS` also exists in `sentinels.rs` (detective
+            // health-check, not importable — it's a private module-level
+            // const there). This local copy must stay in sync with that
+            // value (4).
+            const BFT_MIN_VALIDATORS: usize = 4;
+            if s.consensus.config.validators.len() <= BFT_MIN_VALIDATORS {
+                tracing::warn!(
+                    %did,
+                    current_count = s.consensus.config.validators.len(),
+                    floor = BFT_MIN_VALIDATORS,
+                    "Refusing to apply quorum-certified RemoveValidator commit: \
+                     validator set is at or below the BFT minimum floor. \
+                     Discarding this already-committed change as a no-op to \
+                     preserve the 3f+1 safety invariant."
+                );
+                return None;
+            }
             s.consensus.config.validators.remove(did);
             let mut keys = s.validator_public_keys.as_map().clone();
             keys.remove(did);
@@ -305,20 +340,28 @@ async fn commit_receipt_from_certificate(
 /// the audit trail reflects *what* changed, not just *that* something
 /// committed.
 ///
-/// KNOWN GAP (concurrent-remove BFT floor race): the minimum-validator BFT
-/// floor (`BFT_MIN_VALIDATORS` in `sentinels.rs`) is enforced only at
-/// proposal-submission time, in `api.rs::handle_validator_change` (which
-/// checks the *current* live validator count before accepting a removal
-/// proposal). Two `RemoveValidator` proposals that each individually pass
-/// that check — because each sees a validator count still at or above the
-/// floor at the moment it is submitted — can both independently reach
-/// quorum and commit here in sequence, jointly dropping the live set below
-/// the BFT-safe minimum even though neither commit violated the floor on
-/// its own. This function does not re-check the floor at application time:
-/// doing so would mean rejecting an already quorum-certified commit, which
-/// raises a bigger design question (does the floor gate proposal
-/// submission, vote casting, or commit application?) than this lane's
-/// scope covers. Surfaced, not fixed, per VCG-005 remediation notes.
+/// CLOSED (W3(A)/R1.5, was: concurrent-remove BFT floor race): the
+/// minimum-validator BFT floor is now re-enforced *here*, at apply-on-commit
+/// time, inside `apply_committed_validator_change_in_memory`'s
+/// `RemoveValidator` arm — not only at proposal-submission time in
+/// `api.rs::handle_validator_change` (which checks the *current* live
+/// validator count before accepting a removal proposal, and remains a
+/// fast-fail UX pre-check, not the safety boundary). Previously, two
+/// `RemoveValidator` proposals that each individually passed that
+/// propose-time check — because each saw a validator count still at or
+/// above the floor at the moment it was submitted — could both
+/// independently reach quorum and commit here in sequence, jointly dropping
+/// the live set below the BFT-safe minimum even though neither commit
+/// violated the floor on its own. The apply-time re-check closes this: it
+/// runs inside the same `with_reactor_state_blocking` critical section as
+/// the mutation, so the single `Mutex<ReactorState>` serializes concurrent
+/// apply tasks and whichever runs second observes the already-decremented
+/// count and discards its already-quorum-certified commit as a no-op. See
+/// `apply_committed_validator_change_in_memory`'s `RemoveValidator` arm for
+/// the guard itself, and the `remove_validator_at_floor_refused_at_apply_time_even_bypassing_http_handler`
+/// / `concurrent_removals_cannot_drop_validator_set_below_floor` tests below
+/// for RED-before/GREEN-after evidence. VCG-005 remediation notes updated
+/// accordingly in GAP-REGISTRY.md.
 async fn apply_committed_validator_change_after_commit(
     state: &SharedReactorState,
     store: &Arc<Mutex<SqliteDagStore>>,
@@ -3200,6 +3243,239 @@ mod tests {
                 "persisted validator set must not change without quorum-gated commit"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // W3(A)/R1.5: BFT min-4 validator floor enforced at apply-on-commit,
+    // not just at api.rs's propose-time pre-check. See the module-level
+    // `apply_committed_validator_change_in_memory` doc comment for the
+    // concurrent-remove race this closes.
+
+    /// Minimal `TrustReceipt` fixture for driving
+    /// `apply_committed_validator_change_after_commit` directly in tests,
+    /// bypassing the full propose/vote/commit machinery already covered by
+    /// the sibling tests above. Content doesn't matter for these tests —
+    /// the function only reads `receipt.receipt_hash` for a log field.
+    fn dummy_receipt_for_test(
+        node_hash: Hash256,
+        sign_fn: &Arc<dyn Fn(&[u8]) -> Signature + Send + Sync>,
+    ) -> TrustReceipt {
+        TrustReceipt::new(
+            Did::new("did:exo:v0").unwrap(),
+            Hash256::digest(b"test-authority-chain"),
+            None,
+            "dag.commit".to_string(),
+            node_hash,
+            ReceiptOutcome::Executed,
+            Timestamp::new(1_700_000_000, 0),
+            &**sign_fn,
+        )
+        .expect("dummy trust receipt builds")
+    }
+
+    /// Persist a `RemoveValidator` governance payload for `target` as a
+    /// committed DAG node, returning its hash. Mirrors the persistence the
+    /// real propose → quorum → commit path performs (`store.put_sync` +
+    /// `store.save_governance_payload`) without needing to actually drive
+    /// consensus voting — these tests target
+    /// `apply_committed_validator_change_after_commit` directly, which only
+    /// needs the committed node + governance payload to already exist.
+    fn persist_remove_validator_node(
+        store: &Arc<Mutex<SqliteDagStore>>,
+        dag: &mut Dag,
+        clock: &mut DeterministicDagClock,
+        parents: &[Hash256],
+        creator: &Did,
+        sign_fn: &dyn Fn(&[u8]) -> Signature,
+        target: &Did,
+    ) -> Hash256 {
+        let change = crate::wire::ValidatorChange::RemoveValidator {
+            did: target.clone(),
+        };
+        let mut payload = Vec::new();
+        ciborium::into_writer(&change, &mut payload).unwrap();
+
+        let node = append(dag, parents, &payload, creator, sign_fn, clock).unwrap();
+        store.lock().unwrap().put_sync(node.clone()).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .save_governance_payload(&node.hash, &payload)
+            .unwrap();
+        node.hash
+    }
+
+    #[tokio::test]
+    async fn remove_validator_at_floor_refused_at_apply_time_even_bypassing_http_handler() {
+        // Exactly at the BFT floor (4 validators). A RemoveValidator commit
+        // reaching the apply step here must be refused as a no-op — this
+        // is the invariant api.rs's propose-time `validator_count <= 4`
+        // check cannot enforce for any caller that reaches
+        // `apply_committed_validator_change_after_commit` directly (e.g. a
+        // future internal caller, or the second half of the concurrent
+        // race exercised by the sibling test below).
+        let validators = make_validators(4);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let target = validator_vec[3].clone();
+        let config = config_for(validator_vec[0].clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+
+        let hash = persist_remove_validator_node(
+            &store,
+            &mut dag,
+            &mut clock,
+            &[],
+            &validator_vec[0],
+            &*sign_fn,
+            &target,
+        );
+        let receipt = dummy_receipt_for_test(hash, &sign_fn);
+
+        apply_committed_validator_change_after_commit(&state, &store, &hash, &receipt).await;
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.consensus.config.validators.len(),
+            4,
+            "validator set must stay at the BFT floor — apply-time refusal is a no-op"
+        );
+        assert!(
+            s.consensus.config.validators.contains(&target),
+            "target validator must still be present — the removal must have been refused"
+        );
+        assert!(
+            s.validator_public_keys.as_map().contains_key(&target),
+            "target validator's public key must not be dropped when the removal is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_removals_cannot_drop_validator_set_below_floor() {
+        // THE RACE (VCG-005 concurrent-remove gap): 5 validators, two
+        // independent RemoveValidator commits for two different DIDs, each
+        // individually legitimate (5 > 4 at the moment either is proposed).
+        // Applied sequentially through the same lock with no re-check, the
+        // set would drop 5 -> 4 -> 3, one below the 3f+1=4 safety floor.
+        // Before the fix this test observes exactly that: both removals
+        // apply and the set drops to 3. After the fix, the single
+        // `Mutex<ReactorState>` (entered via `with_reactor_state_blocking`)
+        // serializes the two apply tasks, and whichever runs second sees
+        // the already-decremented count and refuses.
+        let validators = make_validators(5);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let target_a = validator_vec[3].clone();
+        let target_b = validator_vec[4].clone();
+        let config = config_for(validator_vec[0].clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+
+        // Two independently committed RemoveValidator nodes, each targeting
+        // a different DID. Both are persisted up front (mirroring two
+        // proposals that each already reached quorum before either applied)
+        // — the race under test is in the apply step, not the propose/vote
+        // machinery already covered by the sibling quorum tests above.
+        let hash_a = persist_remove_validator_node(
+            &store,
+            &mut dag,
+            &mut clock,
+            &[],
+            &validator_vec[0],
+            &*sign_fn,
+            &target_a,
+        );
+        let hash_b = persist_remove_validator_node(
+            &store,
+            &mut dag,
+            &mut clock,
+            &[hash_a],
+            &validator_vec[0],
+            &*sign_fn,
+            &target_b,
+        );
+        let receipt_a = dummy_receipt_for_test(hash_a, &sign_fn);
+        let receipt_b = dummy_receipt_for_test(hash_b, &sign_fn);
+
+        let state_a = Arc::clone(&state);
+        let store_a = Arc::clone(&store);
+        let task_a = tokio::spawn(async move {
+            apply_committed_validator_change_after_commit(&state_a, &store_a, &hash_a, &receipt_a)
+                .await;
+        });
+
+        let state_b = Arc::clone(&state);
+        let store_b = Arc::clone(&store);
+        let task_b = tokio::spawn(async move {
+            apply_committed_validator_change_after_commit(&state_b, &store_b, &hash_b, &receipt_b)
+                .await;
+        });
+
+        let (joined_a, joined_b) = tokio::join!(task_a, task_b);
+        joined_a.expect("apply task A joins");
+        joined_b.expect("apply task B joins");
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.consensus.config.validators.len(),
+            4,
+            "concurrent removals must never drop the live validator set below the BFT floor of 4"
+        );
+        let a_present = s.consensus.config.validators.contains(&target_a);
+        let b_present = s.consensus.config.validators.contains(&target_b);
+        assert_ne!(
+            a_present, b_present,
+            "exactly one of the two concurrent removals must have applied — the other refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_validator_above_floor_still_applies() {
+        // The new `<=` floor guard must not block a legitimate removal that
+        // keeps the set at or above the BFT minimum: 5 validators, single
+        // removal, set must drop to 4 with the target's key gone.
+        let validators = make_validators(5);
+        let validator_vec: Vec<Did> = validators.iter().cloned().collect();
+        let target = validator_vec[4].clone();
+        let config = config_for(validator_vec[0].clone(), true, validators.clone());
+        let sign_fn = make_sign_fn();
+        let state = create_reactor_state(&config, Arc::clone(&sign_fn), None);
+        let (_dir, store) = temp_store();
+        let mut dag = Dag::new();
+        let mut clock = DeterministicDagClock::new();
+
+        let hash = persist_remove_validator_node(
+            &store,
+            &mut dag,
+            &mut clock,
+            &[],
+            &validator_vec[0],
+            &*sign_fn,
+            &target,
+        );
+        let receipt = dummy_receipt_for_test(hash, &sign_fn);
+
+        apply_committed_validator_change_after_commit(&state, &store, &hash, &receipt).await;
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.consensus.config.validators.len(),
+            4,
+            "a legitimate above-floor removal must still apply"
+        );
+        assert!(
+            !s.consensus.config.validators.contains(&target),
+            "removed validator must be gone from the live set"
+        );
+        assert!(
+            !s.validator_public_keys.as_map().contains_key(&target),
+            "removed validator's public key must be gone from the resolver"
+        );
     }
 
     // ------------------------------------------------------------------
