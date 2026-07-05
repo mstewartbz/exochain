@@ -21,6 +21,24 @@ export interface PublicTrustRouteContract {
   public_claims_allowed: boolean;
   runtime_adapter_state: string | null;
   verified_runtime_adapter: boolean;
+  public_adapter_output_authorization: PublicAdapterOutputAuthorizationMetadata | null;
+}
+
+export interface PublicAdapterOutputAuthorizationMetadata {
+  schema: string | null;
+  subject: string | null;
+  audience: string | null;
+  claims: readonly string[];
+  evidence_hash: string | null;
+  receipt_id: string | null;
+  proof_id: string | null;
+  proof_ref: string | null;
+  generated_at: string | null;
+  valid_from: string | null;
+  expires_at: string | null;
+  proof_type: string | null;
+  response_state: string | null;
+  transport_called: boolean;
 }
 
 export interface LandingPublicTrustDisplayCopy {
@@ -63,15 +81,15 @@ const ACTIVE_COPY: LandingPublicTrustDisplayCopy = {
   machineState: 'public_trust_claims_allowed',
   trustStripLead: 'EXOCHAIN public trust output authorized',
   trustStripDetail:
-    'Route status: public_claims_allowed=true and machine_state=public_trust_claims_allowed.',
+    'Route status: public_claims_allowed=true and machine_state=public_trust_claims_allowed; public_adapter_output_authorization.response_state=permit.',
   trustStripItems: [
-    'Adapter-returned public trust state',
+    'Proof-bearing adapter output',
     'Source route: /api/trust/status',
     'Safety operations remain separate',
   ],
   underTheHoodHeading: 'Public trust display is route-authorized.',
   underTheHoodBody:
-    'The landing page may show this EXOCHAIN public trust output because the trust-status route returned the authorized public-claims machine state. Medical, legal, custody, consent, and emergency decisions remain separate operational duties.',
+    'The landing page may show this EXOCHAIN public trust output because the trust-status route returned the authorized public-claims machine state with proof-bearing public adapter-output metadata. Medical, legal, custody, consent, and emergency decisions remain separate operational duties.',
   identityIdentifierLabel: 'did:exo DID',
   governanceCardTitle: 'Governed by authorized route state',
   governanceCardBody:
@@ -81,6 +99,39 @@ const ACTIVE_COPY: LandingPublicTrustDisplayCopy = {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function readStringArray(value: unknown): readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : [];
+}
+
+function normalizePublicAdapterOutputAuthorization(
+  authorization: unknown,
+): PublicAdapterOutputAuthorizationMetadata | null {
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) {
+    return null;
+  }
+
+  const record = authorization as Record<string, unknown>;
+
+  return {
+    schema: readString(record.schema),
+    subject: readString(record.subject),
+    audience: readString(record.audience),
+    claims: readStringArray(record.claims),
+    evidence_hash: readString(record.evidence_hash),
+    receipt_id: readString(record.receipt_id),
+    proof_id: readString(record.proof_id),
+    proof_ref: readString(record.proof_ref),
+    generated_at: readString(record.generated_at),
+    valid_from: readString(record.valid_from),
+    expires_at: readString(record.expires_at),
+    proof_type: readString(record.proof_type),
+    response_state: readString(record.response_state),
+    transport_called: record.transport_called === true,
+  };
 }
 
 export function normalizePublicTrustRouteContract(
@@ -99,7 +150,48 @@ export function normalizePublicTrustRouteContract(
     public_claims_allowed: record.public_claims_allowed === true,
     runtime_adapter_state: readString(record.runtime_adapter_state),
     verified_runtime_adapter: record.verified_runtime_adapter === true,
+    public_adapter_output_authorization: normalizePublicAdapterOutputAuthorization(
+      record.public_adapter_output_authorization,
+    ),
   };
+}
+
+const REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS = [
+  'livesafe_public_trust_status',
+  'exochain_production_evidence_verified',
+  'livesafe_runtime_adapter_verified',
+] as const;
+
+function isNonEmptyString(value: string | null): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function hasRequiredAdapterOutputClaims(claims: readonly string[]): boolean {
+  return REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS.every((claim) =>
+    claims.includes(claim),
+  );
+}
+
+function hasAuthorizedPublicAdapterOutputMetadata(
+  authorization: PublicAdapterOutputAuthorizationMetadata | null,
+): boolean {
+  return (
+    authorization?.schema === 'livesafe.public_adapter_output_authorization.v1' &&
+    authorization.subject === 'livesafe.ai' &&
+    authorization.audience === 'https://livesafe.ai/api/trust/status' &&
+    hasRequiredAdapterOutputClaims(authorization.claims) &&
+    isNonEmptyString(authorization.evidence_hash) &&
+    authorization.evidence_hash.startsWith('sha256:') &&
+    isNonEmptyString(authorization.receipt_id) &&
+    isNonEmptyString(authorization.proof_id) &&
+    isNonEmptyString(authorization.proof_ref) &&
+    isNonEmptyString(authorization.generated_at) &&
+    isNonEmptyString(authorization.valid_from) &&
+    isNonEmptyString(authorization.expires_at) &&
+    authorization.proof_type === 'ed25519-public-adapter-output-authorization' &&
+    authorization.response_state === 'permit' &&
+    authorization.transport_called === true
+  );
 }
 
 export function isAuthorizedPublicTrustRoute(status?: unknown): boolean {
@@ -111,7 +203,10 @@ export function isAuthorizedPublicTrustRoute(status?: unknown): boolean {
     routeStatus.state === 'externally-verified' &&
     routeStatus.display_text === 'VERIFIED' &&
     routeStatus.runtime_adapter_state === 'verified' &&
-    routeStatus.verified_runtime_adapter === true
+    routeStatus.verified_runtime_adapter === true &&
+    hasAuthorizedPublicAdapterOutputMetadata(
+      routeStatus.public_adapter_output_authorization,
+    )
   );
 }
 

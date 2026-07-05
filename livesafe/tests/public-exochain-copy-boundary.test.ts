@@ -125,13 +125,40 @@ function flattenCopy(copy: ReturnType<PublicTrustDisplayCopyModule["getLandingPu
   ].join(" ");
 }
 
-const authorizedPublicTrustStatus = {
+const genericPublicTrustStatus = {
   state: "externally-verified",
   display_text: "VERIFIED",
   machine_state: "public_trust_claims_allowed",
   public_claims_allowed: true,
   runtime_adapter_state: "verified",
   verified_runtime_adapter: true,
+} as const;
+
+const publicAdapterOutputAuthorization = {
+  schema: "livesafe.public_adapter_output_authorization.v1",
+  subject: "livesafe.ai",
+  audience: "https://livesafe.ai/api/trust/status",
+  claims: [
+    "livesafe_public_trust_status",
+    "exochain_production_evidence_verified",
+    "livesafe_runtime_adapter_verified",
+  ],
+  evidence_hash:
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  receipt_id: "exo-receipt:public-adapter-output:2026-07-05",
+  proof_id: "exo-proof:public-adapter-output:2026-07-05",
+  proof_ref: "exo://receipts/public-adapter-output/2026-07-05",
+  generated_at: "2026-07-05T11:59:00.000Z",
+  valid_from: "2026-07-05T11:55:00.000Z",
+  expires_at: "2026-07-05T12:05:00.000Z",
+  proof_type: "ed25519-public-adapter-output-authorization",
+  response_state: "permit",
+  transport_called: true,
+} as const;
+
+const authorizedPublicTrustStatus = {
+  ...genericPublicTrustStatus,
+  public_adapter_output_authorization: publicAdapterOutputAuthorization,
 } as const;
 
 describe("public EXOCHAIN copy boundary", () => {
@@ -197,25 +224,54 @@ describe("public EXOCHAIN copy boundary", () => {
         runtime_adapter_state: "verified",
         verified_runtime_adapter: true,
       },
+      genericPublicTrustStatus,
       {
-        ...authorizedPublicTrustStatus,
+        ...genericPublicTrustStatus,
         public_claims_allowed: false,
       },
       {
-        ...authorizedPublicTrustStatus,
+        ...genericPublicTrustStatus,
         machine_state: "not_verified",
       },
       {
-        ...authorizedPublicTrustStatus,
+        ...genericPublicTrustStatus,
         state: "not-verified",
       },
       {
-        ...authorizedPublicTrustStatus,
+        ...genericPublicTrustStatus,
         runtime_adapter_state: "unverified",
       },
       {
-        ...authorizedPublicTrustStatus,
+        ...genericPublicTrustStatus,
         verified_runtime_adapter: false,
+      },
+      {
+        ...genericPublicTrustStatus,
+        public_adapter_output_authorization: {
+          ...publicAdapterOutputAuthorization,
+          response_state: "deny",
+        },
+      },
+      {
+        ...genericPublicTrustStatus,
+        public_adapter_output_authorization: {
+          ...publicAdapterOutputAuthorization,
+          transport_called: false,
+        },
+      },
+      {
+        ...genericPublicTrustStatus,
+        public_adapter_output_authorization: {
+          ...publicAdapterOutputAuthorization,
+          evidence_hash: "",
+        },
+      },
+      {
+        ...genericPublicTrustStatus,
+        public_adapter_output_authorization: {
+          ...publicAdapterOutputAuthorization,
+          proof_id: "",
+        },
       },
     ];
 
@@ -229,6 +285,22 @@ describe("public EXOCHAIN copy boundary", () => {
       expect(renderedText).toContain("EXOCHAIN public trust copy inactive");
       expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
     }
+  });
+
+  it("keeps the old six-field generic public route status inactive", async () => {
+    const {
+      getLandingPublicTrustDisplayCopy,
+      isAuthorizedPublicTrustRoute,
+    } = await loadPublicTrustDisplayCopy();
+
+    const copy = getLandingPublicTrustDisplayCopy(genericPublicTrustStatus);
+    const renderedText = flattenCopy(copy);
+
+    expect(isAuthorizedPublicTrustRoute(genericPublicTrustStatus)).toBe(false);
+    expect(copy.trustBearingClaimsVisible).toBe(false);
+    expect(copy.machineState).toBe("not_verified");
+    expect(renderedText).toContain("EXOCHAIN public trust copy inactive");
+    expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
   });
 
   it("allows landing trust copy only for the authorized public adapter-output state", async () => {
@@ -246,6 +318,9 @@ describe("public EXOCHAIN copy boundary", () => {
     expect(renderedText).toContain("EXOCHAIN public trust output authorized");
     expect(renderedText).toContain(
       "public_claims_allowed=true and machine_state=public_trust_claims_allowed",
+    );
+    expect(renderedText).toContain(
+      "public_adapter_output_authorization.response_state=permit",
     );
     for (const pattern of ACTIVE_COPY_DENIED_PATTERNS) {
       expect(renderedText).not.toMatch(pattern);
