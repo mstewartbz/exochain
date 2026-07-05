@@ -162,4 +162,24 @@ describe("LiveSafe Railway CI/CD baseline", () => {
     expect(script).not.toContain("railway variable list");
     expect(script).not.toContain("--kv");
   });
+
+  it("supports explicit fail-closed and authorized-green public-claims smoke contracts", () => {
+    const script = readRepoFile("scripts/livesafe-railway-smoke.sh");
+
+    expect(script).toContain(
+      'expected_public_claims_allowed="${LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED:-false}"',
+    );
+    expect(script).toContain('case "$expected_public_claims_allowed" in');
+    expect(script).toContain("public_claims_allowed == false");
+    expect(script).toContain("public_claims_allowed == true");
+    expect(script).toContain('.machine_state == "public_trust_claims_allowed"');
+    expect(script).toContain(
+      ".public_adapter_output_authorization.response_state == \"permit\"",
+    );
+    expect(script).toContain(
+      ".public_adapter_output_authorization.transport_called == true",
+    );
+    expect(script).not.toContain("railway variable list");
+    expect(script).not.toContain("--kv");
+  });
 });

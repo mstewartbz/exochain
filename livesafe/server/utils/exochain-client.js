@@ -7,6 +7,8 @@
  * Gateway: http://localhost:8080/graphql (configurable via EXOCHAIN_GATEWAY_URL)
  */
 
+const crypto = require('node:crypto');
+
 const {
   ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS,
   PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
@@ -30,11 +32,17 @@ const EXOCHAIN_GATEWAY_REJECTED_ERROR = 'EXOCHAIN_GATEWAY_REJECTED';
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE =
   '/api/v1/avc/livesafe/public-adapter-output-authorization';
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS = 5000;
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TTL_MS = 5 * 60 * 1000;
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_MAX_TTL_MS = 5 * 60 * 1000;
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_IDEMPOTENCY_NAMESPACE =
+  'livesafe-public-adapter-output';
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE =
   'ed25519-public-adapter-output-authorization';
 const SHA256_EVIDENCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const STRICT_UTC_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const PUBLIC_AUTHORIZATION_IDEMPOTENCY_NAMESPACE_PATTERN =
+  /^[a-z0-9][a-z0-9_.:-]{0,79}$/;
 
 function isRequiredTransportIdentifier(value) {
   return (
@@ -154,42 +162,182 @@ function parseStrictUtcTimestampEnv(value) {
   };
 }
 
+function parsePublicAuthorizationBaseUrl(value) {
+  if (!isNonEmptyString(value)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return null;
+    }
+
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function parsePublicAuthorizationNamespace(value) {
+  const namespace = isNonEmptyString(value)
+    ? value.trim()
+    : PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_IDEMPOTENCY_NAMESPACE;
+
+  return PUBLIC_AUTHORIZATION_IDEMPOTENCY_NAMESPACE_PATTERN.test(namespace)
+    ? namespace
+    : null;
+}
+
+function parsePublicAuthorizationTtlMs(value) {
+  if (!isNonEmptyString(value)) {
+    return PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TTL_MS;
+  }
+
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0 ||
+    parsed > PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_MAX_TTL_MS
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function publicAuthorizationWindowStartMs(physicalMs, ttlMs) {
+  return physicalMs - (physicalMs % ttlMs);
+}
+
+function publicAuthorizationIdempotencyDigest(material) {
+  const canonicalMaterial = JSON.stringify({
+    audience: material.audience,
+    credential_id: material.credentialId,
+    evidence_hash: material.evidenceHash,
+    schema: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
+    subject: material.subject,
+    ttl_ms: material.ttlMs,
+    window_start_ms: material.windowStartMs,
+  });
+
+  return crypto
+    .createHash('sha256')
+    .update(canonicalMaterial, 'utf8')
+    .digest('hex');
+}
+
+function buildPublicAdapterOutputAuthorizationRequest({
+  subject,
+  audience,
+  credentialId,
+  credentialIdBytes,
+  evidenceHash,
+  evidenceHashBytes,
+  currentAt,
+  namespace,
+  ttlMs,
+}) {
+  if (
+    !isNonEmptyString(subject) ||
+    !isNonEmptyString(audience) ||
+    !SHA256_EVIDENCE_HASH_PATTERN.test(credentialId || '') ||
+    !SHA256_EVIDENCE_HASH_PATTERN.test(evidenceHash || '') ||
+    !isByteArrayOfLength(credentialIdBytes, 32) ||
+    !isByteArrayOfLength(evidenceHashBytes, 32) ||
+    !isNonEmptyString(namespace) ||
+    !PUBLIC_AUTHORIZATION_IDEMPOTENCY_NAMESPACE_PATTERN.test(namespace) ||
+    !Number.isSafeInteger(ttlMs) ||
+    ttlMs <= 0 ||
+    ttlMs > PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_MAX_TTL_MS
+  ) {
+    return null;
+  }
+
+  const currentTimestamp = parseStrictUtcTimestampEnv(currentAt);
+  if (!currentTimestamp) {
+    return null;
+  }
+
+  const expiresPhysicalMs = currentTimestamp.physical_ms + ttlMs;
+  if (!Number.isSafeInteger(expiresPhysicalMs)) {
+    return null;
+  }
+
+  const windowStartMs = publicAuthorizationWindowStartMs(
+    currentTimestamp.physical_ms,
+    ttlMs,
+  );
+  const digest = publicAuthorizationIdempotencyDigest({
+    subject,
+    audience,
+    credentialId,
+    evidenceHash,
+    ttlMs,
+    windowStartMs,
+  });
+
+  return {
+    subject,
+    audience,
+    credential_id: [...credentialIdBytes],
+    evidence_hash: [...evidenceHashBytes],
+    idempotency_key: `${namespace}:sha256:${digest}`,
+    expires_at: {
+      physical_ms: expiresPhysicalMs,
+      logical: 0,
+    },
+  };
+}
+
 function getPublicAdapterOutputAuthorizationConfig() {
   const baseUrl =
     envString('EXOCHAIN_NODE_AVC_URL') || envString('EXOCHAIN_NODE_URL');
   const bearer = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER');
   const credentialId = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID');
   const evidenceHash = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH');
-  const idempotencyKey = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY');
-  const expiresAt = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT');
+  const namespace = parsePublicAuthorizationNamespace(
+    envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_NAMESPACE'),
+  );
+  const ttlMs = parsePublicAuthorizationTtlMs(
+    envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TTL_MS'),
+  );
   const timeoutMs = parsePositiveInteger(
     envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS'),
     PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS,
   );
+  const validatedBaseUrl = parsePublicAuthorizationBaseUrl(baseUrl);
   const credentialHash = parseHash256Env(credentialId);
   const evidenceHashValue = parseHash256Env(evidenceHash);
-  const expiresAtTimestamp = parseStrictUtcTimestampEnv(expiresAt);
 
   if (
-    !baseUrl ||
+    !validatedBaseUrl ||
     !bearer ||
     !credentialHash ||
     !evidenceHashValue ||
-    !idempotencyKey ||
-    !expiresAtTimestamp
+    !namespace ||
+    !ttlMs
   ) {
     return null;
   }
 
   return {
-    baseUrl,
+    baseUrl: validatedBaseUrl,
     bearer,
     credentialId: credentialHash.canonical,
     credentialIdBytes: credentialHash.bytes,
     evidenceHash: evidenceHashValue.canonical,
     evidenceHashBytes: evidenceHashValue.bytes,
-    idempotencyKey,
-    expiresAt: expiresAtTimestamp,
+    namespace,
+    ttlMs,
     timeoutMs,
   };
 }
@@ -770,14 +918,22 @@ class ExochainClient {
         : null;
 
     try {
-      const body = {
+      const body = buildPublicAdapterOutputAuthorizationRequest({
         subject,
         audience,
-        credential_id: [...config.credentialIdBytes],
-        evidence_hash: [...config.evidenceHashBytes],
-        idempotency_key: config.idempotencyKey,
-        expires_at: { ...config.expiresAt },
-      };
+        credentialId: config.credentialId,
+        credentialIdBytes: config.credentialIdBytes,
+        evidenceHash: config.evidenceHash,
+        evidenceHashBytes: config.evidenceHashBytes,
+        currentAt,
+        namespace: config.namespace,
+        ttlMs: config.ttlMs,
+      });
+
+      if (!body) {
+        console.warn('[EXOCHAIN] public adapter-output authorization request rejected malformed freshness inputs before transport');
+        return createPublicAuthorizationDenied();
+      }
 
       const response = await fetch(
         buildPublicAdapterOutputAuthorizationUrl(config.baseUrl),
@@ -877,4 +1033,8 @@ class ExochainClient {
 // Singleton instance
 const exochain = new ExochainClient();
 
-module.exports = { ExochainClient, exochain };
+module.exports = {
+  ExochainClient,
+  buildPublicAdapterOutputAuthorizationRequest,
+  exochain,
+};

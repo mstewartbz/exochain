@@ -21,10 +21,50 @@ case "$target_environment" in
 esac
 
 deadline_seconds="${LIVESAFE_RAILWAY_SMOKE_TIMEOUT_SECONDS:-600}"
+expected_public_claims_allowed="${LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED:-false}"
 services_json=""
 livesafe_url=""
 health_json=""
 trust_json=""
+trust_status_filter=""
+
+case "$expected_public_claims_allowed" in
+  false)
+    trust_status_filter='
+      .exochain_connected == true and
+      .verified_runtime_adapter == true and
+      .runtime_adapter_state == "verified" and
+      .public_claims_allowed == false
+    '
+    ;;
+  true)
+    trust_status_filter='
+      .exochain_connected == true and
+      .verified_runtime_adapter == true and
+      .runtime_adapter_state == "verified" and
+      .public_claims_allowed == true and
+      .machine_state == "public_trust_claims_allowed" and
+      (.public_adapter_output_authorization | type == "object") and
+      .public_adapter_output_authorization.schema == "livesafe.public_adapter_output_authorization.v1" and
+      .public_adapter_output_authorization.subject == "livesafe.ai" and
+      .public_adapter_output_authorization.audience == "https://livesafe.ai/api/trust/status" and
+      (.public_adapter_output_authorization.claims | type == "array" and length == 3) and
+      (.public_adapter_output_authorization.evidence_hash | test("^sha256:[a-f0-9]{64}$")) and
+      (.public_adapter_output_authorization.receipt_id | type == "string" and length > 0) and
+      (.public_adapter_output_authorization.proof_id | type == "string" and length > 0) and
+      (.public_adapter_output_authorization.proof_ref | type == "string" and length > 0) and
+      (.public_adapter_output_authorization.generated_at | type == "string" and length > 0) and
+      (.public_adapter_output_authorization.valid_from | type == "string" and length > 0) and
+      (.public_adapter_output_authorization.expires_at | type == "string" and length > 0) and
+      .public_adapter_output_authorization.response_state == "permit" and
+      .public_adapter_output_authorization.transport_called == true
+    '
+    ;;
+  *)
+    printf 'LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED must be false or true\n' >&2
+    exit 64
+    ;;
+esac
 
 while [ "$SECONDS" -lt "$deadline_seconds" ]; do
   services_json="$(railway service list --project "$RAILWAY_PROJECT_ID" --environment "$railway_environment_id" --json)"
@@ -43,12 +83,7 @@ while [ "$SECONDS" -lt "$deadline_seconds" ]; do
         .status == "ok" and
         .database == "connected" and
         .exochain_connected == true
-      ' >/dev/null && printf '%s' "$trust_json" | jq -e '
-        .exochain_connected == true and
-        .verified_runtime_adapter == true and
-        .runtime_adapter_state == "verified" and
-        .public_claims_allowed == false
-      ' >/dev/null; then
+      ' >/dev/null && printf '%s' "$trust_json" | jq -e "$trust_status_filter" >/dev/null; then
         printf 'LiveSafe %s Railway smoke passed for %s\n' "$target_environment" "$livesafe_url"
         exit 0
       fi
