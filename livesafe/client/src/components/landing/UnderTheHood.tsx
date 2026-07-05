@@ -14,68 +14,80 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ReactNode } from 'react';
 import {
   Fingerprint, KeyRound, TimerReset, Landmark, type LucideIcon,
 } from 'lucide-react';
+import {
+  getLandingPublicTrustDisplayCopy,
+  type LandingPublicTrustDisplayCopy,
+  type PublicTrustRouteContract,
+} from './publicTrustDisplayCopy';
 
 interface HoodCard {
   icon: LucideIcon;
   title: string;
-  body: React.ReactNode;
+  body: ReactNode;
+}
+
+interface UnderTheHoodProps {
+  trustStatus?: PublicTrustRouteContract | null;
 }
 
 /*
  * Copy hedge contract: "designed to / architecture calls for / in the
  * protocol" hedges are load-bearing legal-truth anchors. Do not strip.
  */
-const CARDS: HoodCard[] = [
-  {
-    icon: Fingerprint,
-    title: 'Identity without accounts',
-    body: (
-      <>
-        Your identifier is designed to be derived on your device from your passphrase —
-        SHA-256 to a <code className="font-mono text-xs text-gray-400">did:exo</code>{' '}
-        DID. There is no password table to breach because there are no passwords.
-      </>
-    ),
-  },
-  {
-    icon: KeyRound,
-    title: 'Your passphrase stays home',
-    body: (
-      <>
-        The passphrase itself is designed never to be transmitted — identity
-        derivation belongs client-side, and the architecture calls for X25519
-        encryption envelopes around your profile.
-      </>
-    ),
-  },
-  {
-    icon: TimerReset,
-    title: 'Consent with a clock',
-    body: (
-      <>
-        Every scan grant in the protocol carries{' '}
-        <code className="font-mono text-xs text-gray-400">consent_expires_at_ms</code>.
-        Access that can&rsquo;t expire isn&rsquo;t consent — it&rsquo;s exposure.
-      </>
-    ),
-  },
-  {
-    icon: Landmark,
-    title: 'Governed, not just hosted',
-    body: (
-      <>
-        EXOCHAIN&rsquo;s constitutional model separates powers: no component is
-        designed to both hold your data and decide who sees it. Governance is
-        the runtime, not the PDF.
-      </>
-    ),
-  },
-];
+function buildCards(copy: LandingPublicTrustDisplayCopy): HoodCard[] {
+  return [
+    {
+      icon: Fingerprint,
+      title: 'Identity without accounts',
+      body: (
+        <>
+          Your identifier is designed to be derived on your device from your
+          passphrase into a{' '}
+          <code className="font-mono text-xs text-gray-400">
+            {copy.identityIdentifierLabel}
+          </code>
+          . There is no password table to breach because there are no passwords.
+        </>
+      ),
+    },
+    {
+      icon: KeyRound,
+      title: 'Your passphrase stays home',
+      body: (
+        <>
+          The passphrase itself is designed never to be transmitted. Identity
+          derivation belongs client-side, and the architecture calls for
+          encryption envelopes around your profile.
+        </>
+      ),
+    },
+    {
+      icon: TimerReset,
+      title: 'Consent with a clock',
+      body: (
+        <>
+          Every scan grant in the protocol carries{' '}
+          <code className="font-mono text-xs text-gray-400">consent_expires_at_ms</code>.
+          Access that can&rsquo;t expire is exposure, not consent.
+        </>
+      ),
+    },
+    {
+      icon: Landmark,
+      title: copy.governanceCardTitle,
+      body: copy.governanceCardBody,
+    },
+  ];
+}
 
-export default function UnderTheHood() {
+export default function UnderTheHood({ trustStatus = null }: UnderTheHoodProps) {
+  const copy = getLandingPublicTrustDisplayCopy(trustStatus);
+  const cards = buildCards(copy);
+
   return (
     <section id="under-the-hood" className="scroll-mt-16 bg-white/[0.02] border-y border-white/[0.06] py-20 md:py-28">
       <div className="max-w-6xl mx-auto px-6 md:px-8">
@@ -83,18 +95,14 @@ export default function UnderTheHood() {
           ARCHITECTURE
         </p>
         <h2 className="text-3xl md:text-4xl font-heading font-bold text-white mb-5">
-          Built on a trust fabric, not a terms-of-service.
+          {copy.underTheHoodHeading}
         </h2>
         <p className="text-gray-400 max-w-2xl leading-relaxed mb-12">
-          LiveSafe is a demonstration app built for EXOCHAIN, a constitutional
-          governance runtime. The
-          rules that protect you — consent gating, identified access, threshold
-          custody — are expressed as architecture, designed to be enforced by
-          the system rather than promised by a policy page.
+          {copy.underTheHoodBody}
         </p>
 
         <div className="grid md:grid-cols-2 gap-6">
-          {CARDS.map(({ icon: Icon, title, body }) => (
+          {cards.map(({ icon: Icon, title, body }) => (
             <div
               key={title}
               className="p-8 bg-white/[0.03] border border-white/10 rounded-2xl hover:border-blue-400/30 transition-colors"
@@ -109,7 +117,7 @@ export default function UnderTheHood() {
         </div>
 
         <p className="text-xs text-gray-500 mt-10">
-          EXOCHAIN v0.1.0-beta · Apache-2.0 · open specification
+          {copy.footerStatus} · Apache-2.0 · open specification
         </p>
       </div>
     </section>
