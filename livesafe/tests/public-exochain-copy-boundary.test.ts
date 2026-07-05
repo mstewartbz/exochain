@@ -303,6 +303,94 @@ describe("public EXOCHAIN copy boundary", () => {
     expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
   });
 
+  it("denies active landing trust copy when adapter output includes an unsupported claim", async () => {
+    const {
+      getLandingPublicTrustDisplayCopy,
+      isAuthorizedPublicTrustRoute,
+    } = await loadPublicTrustDisplayCopy();
+
+    const status = {
+      ...genericPublicTrustStatus,
+      public_adapter_output_authorization: {
+        ...publicAdapterOutputAuthorization,
+        claims: [
+          ...publicAdapterOutputAuthorization.claims,
+          "livesafe_marketing_trust_claim",
+        ],
+      },
+    };
+    const copy = getLandingPublicTrustDisplayCopy(status);
+    const renderedText = flattenCopy(copy);
+
+    expect(isAuthorizedPublicTrustRoute(status)).toBe(false);
+    expect(copy.trustBearingClaimsVisible).toBe(false);
+    expect(copy.machineState).toBe("not_verified");
+    expect(renderedText).toContain("EXOCHAIN public trust copy inactive");
+    expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
+  });
+
+  it("denies active landing trust copy when adapter output duplicates a required claim", async () => {
+    const {
+      getLandingPublicTrustDisplayCopy,
+      isAuthorizedPublicTrustRoute,
+    } = await loadPublicTrustDisplayCopy();
+
+    const status = {
+      ...genericPublicTrustStatus,
+      public_adapter_output_authorization: {
+        ...publicAdapterOutputAuthorization,
+        claims: [
+          ...publicAdapterOutputAuthorization.claims,
+          "livesafe_public_trust_status",
+        ],
+      },
+    };
+    const copy = getLandingPublicTrustDisplayCopy(status);
+    const renderedText = flattenCopy(copy);
+
+    expect(isAuthorizedPublicTrustRoute(status)).toBe(false);
+    expect(copy.trustBearingClaimsVisible).toBe(false);
+    expect(copy.machineState).toBe("not_verified");
+    expect(renderedText).toContain("EXOCHAIN public trust copy inactive");
+    expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
+  });
+
+  it("denies active landing trust copy when adapter output adds forbidden public claim terms", async () => {
+    const {
+      getLandingPublicTrustDisplayCopy,
+      isAuthorizedPublicTrustRoute,
+    } = await loadPublicTrustDisplayCopy();
+
+    const forbiddenClaims = [
+      "medical_trust_claim",
+      "legal_trust_claim",
+      "custody_trust_claim",
+      "consent_trust_claim",
+      "emergency_trust_claim",
+    ];
+
+    for (const forbiddenClaim of forbiddenClaims) {
+      const status = {
+        ...genericPublicTrustStatus,
+        public_adapter_output_authorization: {
+          ...publicAdapterOutputAuthorization,
+          claims: [
+            ...publicAdapterOutputAuthorization.claims,
+            forbiddenClaim,
+          ],
+        },
+      };
+      const copy = getLandingPublicTrustDisplayCopy(status);
+      const renderedText = flattenCopy(copy);
+
+      expect(isAuthorizedPublicTrustRoute(status)).toBe(false);
+      expect(copy.trustBearingClaimsVisible).toBe(false);
+      expect(copy.machineState).toBe("not_verified");
+      expect(renderedText).toContain("EXOCHAIN public trust copy inactive");
+      expect(renderedText).not.toContain("EXOCHAIN public trust output authorized");
+    }
+  });
+
   it("allows landing trust copy only for the authorized public adapter-output state", async () => {
     const {
       getLandingPublicTrustDisplayCopy,

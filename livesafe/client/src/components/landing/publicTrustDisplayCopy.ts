@@ -166,9 +166,17 @@ function isNonEmptyString(value: string | null): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+function isRequiredPublicAdapterOutputClaim(claim: string): boolean {
+  return (REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS as readonly string[]).includes(
+    claim,
+  );
+}
+
 function hasRequiredAdapterOutputClaims(claims: readonly string[]): boolean {
-  return REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS.every((claim) =>
-    claims.includes(claim),
+  return (
+    claims.length === REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS.length &&
+    claims.every(isRequiredPublicAdapterOutputClaim) &&
+    REQUIRED_PUBLIC_ADAPTER_OUTPUT_CLAIMS.every((claim) => claims.includes(claim))
   );
 }
 
