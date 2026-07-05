@@ -347,6 +347,7 @@ mod public_output_authorization_tests {
                 .expect("idempotency hash");
         let evidence_hash = h256(0xE1);
         let issued_at = ts(1_500_000);
+        let expires_at = ts(1_700_000);
         let action_commitment_hash =
             livesafe_public_adapter_output_authorization_action_commitment_hash(
                 &credential,
@@ -355,6 +356,7 @@ mod public_output_authorization_tests {
                 evidence_hash,
                 idempotency_key_hash,
                 &issued_at,
+                &expires_at,
             )
             .expect("action commitment");
         LivesafePublicAdapterOutputAuthorizationDraft {
@@ -367,7 +369,7 @@ mod public_output_authorization_tests {
             action_commitment_hash,
             idempotency_key_hash,
             issued_at,
-            expires_at: ts(1_700_000),
+            expires_at,
             signer_did: did("did:exo:public-output-proof-signer"),
         }
     }
@@ -490,6 +492,30 @@ mod public_output_authorization_tests {
     }
 
     #[test]
+    fn public_output_authorization_action_commitment_binds_expiry() {
+        let credential = issue_credential(livesafe_draft());
+        let base = draft_for(credential.clone());
+        let mut changed_expiry = draft_for(credential);
+        changed_expiry.expires_at = ts(1_800_000);
+        changed_expiry.action_commitment_hash =
+            livesafe_public_adapter_output_authorization_action_commitment_hash(
+                &changed_expiry.credential,
+                &changed_expiry.subject,
+                &changed_expiry.audience,
+                changed_expiry.evidence_hash,
+                changed_expiry.idempotency_key_hash,
+                &changed_expiry.issued_at,
+                &changed_expiry.expires_at,
+            )
+            .expect("changed-expiry commitment");
+
+        assert_ne!(
+            base.action_commitment_hash, changed_expiry.action_commitment_hash,
+            "public-output action commitment must bind expires_at"
+        );
+    }
+
+    #[test]
     fn public_output_authorization_payload_binds_public_claim_identity() {
         let credential = issue_credential(livesafe_draft());
         let base = sign_unchecked(draft_for(credential.clone()))
@@ -524,6 +550,7 @@ mod public_output_authorization_tests {
                         d.evidence_hash,
                         d.idempotency_key_hash,
                         &d.issued_at,
+                        &d.expires_at,
                     )
                     .expect("variant commitment");
                 d
@@ -531,6 +558,17 @@ mod public_output_authorization_tests {
             {
                 let mut d = draft_for(credential.clone());
                 d.expires_at = ts(1_800_000);
+                d.action_commitment_hash =
+                    livesafe_public_adapter_output_authorization_action_commitment_hash(
+                        &d.credential,
+                        &d.subject,
+                        &d.audience,
+                        d.evidence_hash,
+                        d.idempotency_key_hash,
+                        &d.issued_at,
+                        &d.expires_at,
+                    )
+                    .expect("variant commitment");
                 d
             },
             {
@@ -551,6 +589,7 @@ mod public_output_authorization_tests {
                         d.evidence_hash,
                         d.idempotency_key_hash,
                         &d.issued_at,
+                        &d.expires_at,
                     )
                     .expect("variant commitment");
                 d

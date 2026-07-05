@@ -2726,6 +2726,7 @@ async fn handle_public_output_authorization(
             &audience,
             evidence_hash,
             idempotency_key_hash,
+            &expires_at,
         )
         .map_err(map_avc_error)?;
 
@@ -2738,6 +2739,7 @@ async fn handle_public_output_authorization(
                     evidence_hash,
                     idempotency_key_hash,
                     &existing.created_at,
+                    &expires_at,
                 )
                 .map_err(map_avc_error)?;
             if existing.credential_id != credential_id
@@ -2779,6 +2781,7 @@ async fn handle_public_output_authorization(
                 evidence_hash,
                 idempotency_key_hash,
                 &issued_at,
+                &expires_at,
             )
             .map_err(map_avc_error)?;
         let action_descriptor = AvcActionDescriptor::from_action(&action);
@@ -5977,6 +5980,51 @@ mod tests {
             state.registry.lock().unwrap().receipt_count(),
             1,
             "same public-output authorization body must reuse the same receipt/proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_output_authorization_conflicts_on_idempotency_key_reuse_with_changed_expiry() {
+        let state = fresh_state();
+        let credential_id =
+            store_livesafe_public_output_credential(&state, livesafe_public_output_credential());
+        let app = avc_router_with_bearer_gate(Arc::clone(&state));
+        let first_request = public_output_authorization_request(
+            credential_id,
+            "public-output-idem-expiry-conflict",
+            Hash256::from_bytes([0xE7; 32]),
+            exo_avc::LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        );
+        let mut changed_expiry = first_request.clone();
+        changed_expiry.expires_at = Timestamp::new(1_800_000, 0);
+
+        let first = post_public_output_authorization(
+            app.clone(),
+            first_request,
+            Some("vcg-006a-admin-token"),
+        )
+        .await;
+        let first_body = read_body(first).await;
+        let first_proof: exo_avc::LivesafePublicAdapterOutputAuthorizationEnvelope =
+            serde_json::from_slice(&first_body).unwrap();
+        let changed =
+            post_public_output_authorization(app, changed_expiry, Some("vcg-006a-admin-token"))
+                .await;
+
+        assert_eq!(changed.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state.registry.lock().unwrap().receipt_count(),
+            1,
+            "changed expires_at under the same idempotency key must not mint a second proof/receipt"
+        );
+        assert!(
+            state
+                .registry
+                .lock()
+                .unwrap()
+                .get_receipt(&first_proof.proof.receipt_id)
+                .is_some(),
+            "original receipt must remain the only replay target"
         );
     }
 

@@ -111,6 +111,7 @@ struct ActionNamePayload<'a> {
     audience: &'a str,
     evidence_hash: &'a Hash256,
     idempotency_key_hash: &'a Hash256,
+    expires_at: &'a Timestamp,
 }
 
 #[derive(Serialize)]
@@ -161,6 +162,7 @@ pub fn livesafe_public_adapter_output_authorization_action_request(
     audience: &str,
     evidence_hash: Hash256,
     idempotency_key_hash: Hash256,
+    expires_at: &Timestamp,
 ) -> Result<AvcActionRequest, AvcError> {
     let action_name_hash = hash_structured(&ActionNamePayload {
         domain: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
@@ -168,6 +170,7 @@ pub fn livesafe_public_adapter_output_authorization_action_request(
         audience,
         evidence_hash: &evidence_hash,
         idempotency_key_hash: &idempotency_key_hash,
+        expires_at,
     })
     .map_err(AvcError::from)?;
     Ok(AvcActionRequest {
@@ -198,6 +201,7 @@ pub fn livesafe_public_adapter_output_authorization_action_commitment_hash(
     evidence_hash: Hash256,
     idempotency_key_hash: Hash256,
     issued_at: &Timestamp,
+    expires_at: &Timestamp,
 ) -> Result<Hash256, AvcError> {
     let action = livesafe_public_adapter_output_authorization_action_request(
         credential,
@@ -205,6 +209,7 @@ pub fn livesafe_public_adapter_output_authorization_action_commitment_hash(
         audience,
         evidence_hash,
         idempotency_key_hash,
+        expires_at,
     )?;
     avc_action_commitment_hash(credential, &action, issued_at)
 }
@@ -239,6 +244,7 @@ pub fn validate_livesafe_public_adapter_output_authorization<R: AvcRegistryRead>
         &draft.audience,
         draft.evidence_hash,
         draft.idempotency_key_hash,
+        &draft.expires_at,
     )?;
     let expected_action_commitment =
         avc_action_commitment_hash(&draft.credential, &action, &draft.issued_at)?;
