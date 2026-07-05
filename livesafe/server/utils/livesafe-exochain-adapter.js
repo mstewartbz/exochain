@@ -3,6 +3,11 @@
 const exochainRegistry = require("../../config/exochain-primitives.json");
 const surfaceIntake = require("../../config/surface-intake.json");
 const { exochain } = require("./exochain-client");
+const {
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+  evaluatePublicAdapterOutputAuthorization,
+} = require("./public-adapter-output-authorization");
 
 const VERIFIED_ADAPTER_STATE = "verified";
 const EXOCHAIN_DID_PATTERN = /^did:exo:[a-z0-9_-]+:[A-Za-z0-9._:-]+$/;
@@ -38,6 +43,7 @@ const WRAPPED_OPERATIONS = [
   "anchorScan",
   "anchorConsent",
   "getPaceStatus",
+  "getPublicAdapterOutputAuthorization",
 ];
 
 function isNonEmptyString(value) {
@@ -257,6 +263,64 @@ function createRuntimeExochainAdapter({
     });
   }
 
+  async function evaluatePublicAuthorizationTransport(options = {}) {
+    const subject = options.subject || PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT;
+    const audience = options.audience || PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE;
+    const currentAt = options.currentAt;
+    const authorityInputsWellFormed =
+      subject === PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT &&
+      audience === PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE &&
+      isNonEmptyString(currentAt);
+    const operationDecision = await runOperation(
+      "getPublicAdapterOutputAuthorization",
+      {
+        authorityInputsWellFormed,
+        containsRawSensitivePayload: false,
+      },
+      async () =>
+        client.getPublicAdapterOutputAuthorization({
+          subject,
+          audience,
+          currentAt,
+        }),
+    );
+    const evaluation = evaluatePublicAdapterOutputAuthorization(
+      {
+        allowed: operationDecision.allowed,
+        responseState: operationDecision.responseState,
+        transportCalled: operationDecision.transportCalled,
+        value: operationDecision.value,
+      },
+      {
+        currentAt,
+        subject: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+        audience: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+      },
+    );
+    const reasons = [
+      ...operationDecision.reasons,
+      ...evaluation.reasons.filter(
+        (reason) => !operationDecision.reasons.includes(reason),
+      ),
+    ];
+    const requiredEvidence = [
+      ...operationDecision.required_evidence,
+      ...evaluation.required_evidence.filter(
+        (evidence) => !operationDecision.required_evidence.includes(evidence),
+      ),
+    ];
+
+    return {
+      allowed: operationDecision.allowed && evaluation.allowed,
+      reasons,
+      required_evidence: requiredEvidence,
+      responseState: operationDecision.responseState,
+      transportCalled: operationDecision.transportCalled,
+      value: evaluation.allowed ? evaluation.metadata : null,
+      metadata: evaluation.metadata,
+    };
+  }
+
   return {
     getRuntimeStatus,
     async getIdentity(did, options = {}) {
@@ -353,6 +417,10 @@ function createRuntimeExochainAdapter({
         return decision;
       }
       return Array.isArray(decision.value) ? decision.value : [];
+    },
+    async getPublicAdapterOutputAuthorization(options = {}) {
+      const decision = await evaluatePublicAuthorizationTransport(options);
+      return options.returnDecision ? decision : decision.metadata;
     },
   };
 }

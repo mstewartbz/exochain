@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const {
   getStatusRouteContracts,
@@ -169,5 +169,95 @@ describe("status route contracts", () => {
     expect(response.statusCode).toBe(405);
     expect(responseHeaders.get("allow")).toBe("GET");
     expect(responseHeaders.get("cache-control")).toBe("no-store");
+  });
+
+  it("awaits async status responders before the route handler resolves", async () => {
+    const handlers = new Map<string, Function>();
+    let releaseResponder: () => void = () => {};
+    const responderGate = new Promise<void>((resolve) => {
+      releaseResponder = resolve;
+    });
+    const app = {
+      get(path: string, handler: Function) {
+        handlers.set(path, handler);
+      },
+      all() {},
+    };
+    const json = vi.fn();
+    const response = {
+      setHeader() {},
+      status() {
+        return { json };
+      },
+    };
+
+    registerStatusRouteContracts(app, {
+      sendHealthResponse() {},
+      async sendTrustStatusResponse(_req: unknown, res: any) {
+        await responderGate;
+        res.status(200).json({ ok: true });
+      },
+      sendAiHelpStatusResponse() {},
+      sendAiHelpUsageSummaryStatusResponse() {},
+      sendAiHelpSessionTranscriptStatusResponse() {},
+      sendAiHelpUnansweredTopicStatusResponse() {},
+      sendFeedbackBoardStatusResponse() {},
+      sendFeedbackCodeHintsStatusResponse() {},
+    });
+
+    const routeResult = handlers.get("/api/trust/status")?.({}, response, vi.fn());
+
+    expect(routeResult).toBeInstanceOf(Promise);
+    expect(json).not.toHaveBeenCalled();
+
+    releaseResponder();
+    await routeResult;
+
+    expect(json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it("propagates async status responder failures to next without leaking secrets", async () => {
+    const handlers = new Map<string, Function>();
+    const app = {
+      get(path: string, handler: Function) {
+        handlers.set(path, handler);
+      },
+      all() {},
+    };
+    const response = {
+      setHeader: vi.fn(),
+      status: vi.fn(() => ({
+        json: vi.fn(),
+      })),
+    };
+    const next = vi.fn();
+
+    registerStatusRouteContracts(app, {
+      sendHealthResponse() {},
+      async sendTrustStatusResponse() {
+        throw new Error(
+          "Bearer secret-production-token private_key=raw-key authorization_header=secret",
+        );
+      },
+      sendAiHelpStatusResponse() {},
+      sendAiHelpUsageSummaryStatusResponse() {},
+      sendAiHelpSessionTranscriptStatusResponse() {},
+      sendAiHelpUnansweredTopicStatusResponse() {},
+      sendFeedbackBoardStatusResponse() {},
+      sendFeedbackCodeHintsStatusResponse() {},
+    });
+
+    await handlers.get("/api/trust/status")?.({}, response, next);
+
+    expect(response.status).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0]?.[0]).toMatchObject({
+      message: "Status route responder failed.",
+      code: "STATUS_ROUTE_RESPONDER_FAILED",
+    });
+    expect(JSON.stringify(next.mock.calls[0]?.[0])).not.toContain(
+      "secret-production-token",
+    );
+    expect(JSON.stringify(next.mock.calls[0]?.[0])).not.toContain("raw-key");
   });
 });

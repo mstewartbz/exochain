@@ -7,6 +7,14 @@
  * Gateway: http://localhost:8080/graphql (configurable via EXOCHAIN_GATEWAY_URL)
  */
 
+const {
+  ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS,
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
+  PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+  evaluatePublicAdapterOutputAuthorization,
+} = require('./public-adapter-output-authorization.js');
+
 const EXOCHAIN_GATEWAY = process.env.EXOCHAIN_GATEWAY_URL || 'http://localhost:8080/graphql';
 const EXOCHAIN_DID_PATTERN = /^did:exo:[a-z0-9_-]+:[A-Za-z0-9._:-]+$/;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
@@ -19,6 +27,14 @@ const ALLOWED_AUDIT_RECEIPT_EVENT_TYPES = new Set([
 const EXOCHAIN_TIMEOUT_ERROR = 'EXOCHAIN_TIMEOUT';
 const EXOCHAIN_UNAVAILABLE_ERROR = 'EXOCHAIN_UNAVAILABLE';
 const EXOCHAIN_GATEWAY_REJECTED_ERROR = 'EXOCHAIN_GATEWAY_REJECTED';
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE =
+  '/api/v1/avc/livesafe/public-adapter-output-authorization';
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS = 5000;
+const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE =
+  'ed25519-public-adapter-output-authorization';
+const SHA256_EVIDENCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const STRICT_UTC_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function isRequiredTransportIdentifier(value) {
   return (
@@ -86,6 +102,371 @@ function createTransportError(code) {
   return { data: null, errors: [{ message: code, code }] };
 }
 
+function createPublicAuthorizationDenied(state = 'rejected') {
+  return { state, value: null };
+}
+
+function isObjectRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function envString(name) {
+  const value = process.env[name];
+  return isNonEmptyString(value) ? value.trim() : '';
+}
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseHash256Env(value) {
+  if (!SHA256_EVIDENCE_HASH_PATTERN.test(value)) {
+    return null;
+  }
+
+  const hex = value.slice('sha256:'.length);
+  const bytes = [];
+  for (let index = 0; index < hex.length; index += 2) {
+    bytes.push(Number.parseInt(hex.slice(index, index + 2), 16));
+  }
+
+  return { canonical: value, bytes };
+}
+
+function parseStrictUtcTimestampEnv(value) {
+  if (!STRICT_UTC_TIMESTAMP_PATTERN.test(value)) {
+    return null;
+  }
+
+  const physicalMs = Date.parse(value);
+  if (!Number.isSafeInteger(physicalMs) || physicalMs < 0) {
+    return null;
+  }
+
+  if (new Date(physicalMs).toISOString() !== value) {
+    return null;
+  }
+
+  return {
+    physical_ms: physicalMs,
+    logical: 0,
+  };
+}
+
+function getPublicAdapterOutputAuthorizationConfig() {
+  const baseUrl =
+    envString('EXOCHAIN_NODE_AVC_URL') || envString('EXOCHAIN_NODE_URL');
+  const bearer = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER');
+  const credentialId = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID');
+  const evidenceHash = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH');
+  const idempotencyKey = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY');
+  const expiresAt = envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT');
+  const timeoutMs = parsePositiveInteger(
+    envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS'),
+    PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS,
+  );
+  const credentialHash = parseHash256Env(credentialId);
+  const evidenceHashValue = parseHash256Env(evidenceHash);
+  const expiresAtTimestamp = parseStrictUtcTimestampEnv(expiresAt);
+
+  if (
+    !baseUrl ||
+    !bearer ||
+    !credentialHash ||
+    !evidenceHashValue ||
+    !idempotencyKey ||
+    !expiresAtTimestamp
+  ) {
+    return null;
+  }
+
+  return {
+    baseUrl,
+    bearer,
+    credentialId: credentialHash.canonical,
+    credentialIdBytes: credentialHash.bytes,
+    evidenceHash: evidenceHashValue.canonical,
+    evidenceHashBytes: evidenceHashValue.bytes,
+    idempotencyKey,
+    expiresAt: expiresAtTimestamp,
+    timeoutMs,
+  };
+}
+
+function buildPublicAdapterOutputAuthorizationUrl(baseUrl) {
+  return `${baseUrl.replace(/\/+$/, '')}${PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE}`;
+}
+
+function coreTimestampToIso(value) {
+  if (isNonEmptyString(value)) {
+    const milliseconds = Date.parse(value);
+    return Number.isNaN(milliseconds) ? null : new Date(milliseconds).toISOString();
+  }
+
+  if (Number.isInteger(value) && value >= 0) {
+    return new Date(value).toISOString();
+  }
+
+  if (isObjectRecord(value)) {
+    if (Number.isInteger(value.physical_ms) && value.physical_ms >= 0) {
+      return new Date(value.physical_ms).toISOString();
+    }
+
+    if (Number.isInteger(value.physicalMs) && value.physicalMs >= 0) {
+      return new Date(value.physicalMs).toISOString();
+    }
+  }
+
+  return null;
+}
+
+const RAW_SENSITIVE_FIELD_KEYS = new Set([
+  'authorization_header',
+  'bearer_token',
+  'credential_bytes',
+  'emergency_contact',
+  'location',
+  'medical_record',
+  'patient',
+  'phi',
+  'pii',
+  'private_key',
+  'raw_authority_chain',
+  'raw_credential_bytes',
+  'raw_sensitive_payload',
+  'scan_payload',
+  'trustee_did',
+  'vault',
+]);
+const RAW_SENSITIVE_FIELD_FRAGMENTS = [
+  'authority_chain',
+  'bearer',
+  'consent_record',
+  'custody_record',
+  'legal_record',
+  'private_key',
+  'scan_record',
+  'trustee_record',
+  'vault_record',
+];
+
+function keyLooksRawSensitive(key) {
+  const normalized = String(key).toLowerCase();
+  return (
+    RAW_SENSITIVE_FIELD_KEYS.has(normalized) ||
+    normalized.startsWith('raw_') ||
+    RAW_SENSITIVE_FIELD_FRAGMENTS.some((fragment) => normalized.includes(fragment))
+  );
+}
+
+function containsRawSensitiveField(value) {
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsRawSensitiveField(entry));
+  }
+
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  return Object.entries(value).some(([key, nestedValue]) => {
+    if (keyLooksRawSensitive(key)) {
+      return true;
+    }
+
+    return containsRawSensitiveField(nestedValue);
+  });
+}
+
+function publicAuthorizationStateFromReasons(reasons) {
+  const combined = reasons.join(' ').toLowerCase();
+
+  if (combined.includes('revoked')) {
+    return 'revoked';
+  }
+
+  if (combined.includes('contradicted')) {
+    return 'contradicted';
+  }
+
+  if (
+    combined.includes('expired') ||
+    combined.includes('not yet valid') ||
+    combined.includes('stale')
+  ) {
+    return 'stale';
+  }
+
+  return 'rejected';
+}
+
+function publicAuthorizationTransportErrorState(error) {
+  const code = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+
+  if (code === 'econnrefused' || code === 'enotfound' || code === 'econnreset') {
+    return 'unavailable';
+  }
+
+  if (error?.name === 'AbortError' || isTimeoutLikeError(error)) {
+    return 'timeout';
+  }
+
+  return 'unavailable';
+}
+
+function isByteArrayOfLength(value, expectedLength) {
+  return (
+    Array.isArray(value) &&
+    value.length === expectedLength &&
+    value.every(
+      (byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255,
+    )
+  );
+}
+
+function bytesToLowerHex(bytes) {
+  return bytes
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function normalizeHash256(value) {
+  if (!isByteArrayOfLength(value, 32)) {
+    return null;
+  }
+
+  return `sha256:${bytesToLowerHex(value)}`;
+}
+
+function normalizePublicAuthorizationSignature(signature) {
+  if (!isObjectRecord(signature)) {
+    return null;
+  }
+
+  const keys = Object.keys(signature);
+  if (keys.length !== 1 || keys[0] !== 'Ed25519') {
+    return null;
+  }
+
+  const bytes = signature.Ed25519;
+  if (!isByteArrayOfLength(bytes, 64)) {
+    return null;
+  }
+
+  return `ed25519:${bytesToLowerHex(bytes)}`;
+}
+
+function publicAuthorizationRevocationState(revocationStatus) {
+  if (!isNonEmptyString(revocationStatus)) {
+    return 'rejected';
+  }
+
+  if (revocationStatus === 'NotRevoked') {
+    return 'active';
+  }
+
+  const normalized = revocationStatus
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .toLowerCase();
+
+  if (normalized === 'revoked') {
+    return 'revoked';
+  }
+
+  return 'rejected';
+}
+
+function isValidSchemaVersion(value) {
+  return value === 1;
+}
+
+function adaptCorePublicAdapterOutputAuthorizationEnvelope(
+  envelope,
+  { subject, audience },
+) {
+  if (!isObjectRecord(envelope)) {
+    return { state: 'rejected', value: null };
+  }
+
+  if (containsRawSensitiveField(envelope)) {
+    return { state: 'rejected', value: null };
+  }
+
+  if (envelope.domain !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA) {
+    return { state: 'rejected', value: null };
+  }
+
+  const proof = isObjectRecord(envelope.proof) ? envelope.proof : null;
+  if (!proof) {
+    return { state: 'rejected', value: null };
+  }
+
+  if (
+    proof.domain !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA ||
+    proof.subject !== subject ||
+    proof.audience !== audience
+  ) {
+    return { state: 'rejected', value: null };
+  }
+
+  if (
+    !isValidSchemaVersion(envelope.schema_version) ||
+    !isValidSchemaVersion(proof.schema_version)
+  ) {
+    return { state: 'rejected', value: null };
+  }
+
+  const revocationState = publicAuthorizationRevocationState(
+    proof.revocation_status,
+  );
+  if (revocationState !== 'active') {
+    return { state: revocationState, value: null };
+  }
+
+  const generatedAt = coreTimestampToIso(proof.issued_at);
+  const expiresAt = coreTimestampToIso(proof.expires_at);
+  const evidenceHash = normalizeHash256(proof.evidence_hash);
+  const actionCommitmentHash = normalizeHash256(proof.action_commitment_hash);
+  const idempotencyKeyHash = normalizeHash256(proof.idempotency_key_hash);
+  const proofHash = normalizeHash256(proof.proof_hash);
+  const signature = normalizePublicAuthorizationSignature(proof.signature);
+  if (
+    !evidenceHash ||
+    !actionCommitmentHash ||
+    !idempotencyKeyHash ||
+    !proofHash ||
+    !signature ||
+    !isNonEmptyString(proof.credential_id) ||
+    !isNonEmptyString(proof.receipt_id) ||
+    !isNonEmptyString(proof.signer_did)
+  ) {
+    return { state: 'rejected', value: null };
+  }
+
+  return {
+    state: 'permit',
+    value: {
+      schema: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
+      subject: proof.subject,
+      audience: proof.audience,
+      claims: [...ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS],
+      evidence_hash: evidenceHash,
+      receipt_id: proof.receipt_id,
+      proof_id: proofHash,
+      proof_ref: `exochain-avc:${proofHash}`,
+      generated_at: generatedAt,
+      valid_from: generatedAt,
+      expires_at: expiresAt,
+      proof: {
+        type: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE,
+        signature,
+      },
+    },
+  };
+}
+
 class ExochainClient {
   constructor(gatewayUrl = EXOCHAIN_GATEWAY) {
     this.gatewayUrl = gatewayUrl;
@@ -105,7 +486,7 @@ class ExochainClient {
       }
       return await response.json();
     } catch (err) {
-      console.warn(`[EXOCHAIN] Gateway unreachable: ${err.message}`);
+      console.warn('[EXOCHAIN] Gateway unreachable: redacted transport failure');
       return createTransportError(
         isTimeoutLikeError(err) ? EXOCHAIN_TIMEOUT_ERROR : EXOCHAIN_UNAVAILABLE_ERROR,
       );
@@ -363,6 +744,115 @@ class ExochainClient {
     } catch (err) {
       console.warn(`[EXOCHAIN] getPaceStatus error: ${err.message}`);
       return [];
+    }
+  }
+
+  async getPublicAdapterOutputAuthorization({ subject, audience, currentAt } = {}) {
+    if (
+      subject !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT ||
+      audience !== PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE
+    ) {
+      console.warn('[EXOCHAIN] public adapter-output authorization rejected malformed target before transport');
+      return createPublicAuthorizationDenied();
+    }
+
+    const config = getPublicAdapterOutputAuthorizationConfig();
+    if (!config) {
+      console.warn('[EXOCHAIN] public adapter-output authorization REST transport is unconfigured');
+      return createPublicAuthorizationDenied('unavailable');
+    }
+
+    const controller =
+      typeof AbortController === 'function' ? new AbortController() : null;
+    const timeout =
+      controller && config.timeoutMs > 0
+        ? setTimeout(() => controller.abort(), config.timeoutMs)
+        : null;
+
+    try {
+      const body = {
+        subject,
+        audience,
+        credential_id: [...config.credentialIdBytes],
+        evidence_hash: [...config.evidenceHashBytes],
+        idempotency_key: config.idempotencyKey,
+        expires_at: { ...config.expiresAt },
+      };
+
+      const response = await fetch(
+        buildPublicAdapterOutputAuthorizationUrl(config.baseUrl),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.bearer}`,
+          },
+          body: JSON.stringify(body),
+          signal: controller?.signal,
+        },
+      );
+
+      if (!response.ok) {
+        console.warn(
+          '[EXOCHAIN] public adapter-output authorization REST transport rejected the request',
+        );
+        return createPublicAuthorizationDenied(
+          response.status === 408 || response.status === 504
+            ? 'timeout'
+            : response.status >= 500
+              ? 'unavailable'
+              : 'rejected',
+        );
+      }
+
+      const envelope = await response.json();
+      const adapted = adaptCorePublicAdapterOutputAuthorizationEnvelope(
+        envelope,
+        {
+          subject,
+          audience,
+        },
+      );
+
+      if (adapted.state !== 'permit') {
+        console.warn('[EXOCHAIN] public adapter-output authorization REST envelope denied');
+        return adapted;
+      }
+
+      if (adapted.value.evidence_hash !== config.evidenceHash) {
+        console.warn('[EXOCHAIN] public adapter-output authorization evidence hash mismatch');
+        return createPublicAuthorizationDenied();
+      }
+
+      const evaluation = evaluatePublicAdapterOutputAuthorization(
+        {
+          allowed: true,
+          responseState: 'permit',
+          transportCalled: true,
+          value: adapted.value,
+        },
+        {
+          currentAt,
+          subject: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+          audience: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+        },
+      );
+
+      if (!evaluation.allowed) {
+        console.warn('[EXOCHAIN] public adapter-output authorization evaluator denied REST envelope');
+        return createPublicAuthorizationDenied(
+          publicAuthorizationStateFromReasons(evaluation.reasons),
+        );
+      }
+
+      return adapted;
+    } catch (err) {
+      console.warn('[EXOCHAIN] public adapter-output authorization REST transport failed');
+      return createPublicAuthorizationDenied(publicAuthorizationTransportErrorState(err));
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
     }
   }
 

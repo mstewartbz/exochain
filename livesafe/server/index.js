@@ -36,7 +36,7 @@ const {
   sendFeedbackCodeHintsStatusResponse,
 } = require('./utils/feedback-code-hints-status');
 const { sendHealthStatusResponse } = require('./utils/health-status');
-const { sendTrustStatusResponse } = require('./utils/trust-status');
+const { sendLiveTrustStatusResponse } = require('./utils/trust-status');
 const {
   runtimeExochainConnectivityStatus,
 } = require('./utils/exochain-connectivity-status');
@@ -246,8 +246,8 @@ async function startServer() {
           uptime: process.uptime(),
         });
       },
-      sendTrustStatusResponse(req, res) {
-        sendTrustStatusResponse(req, res, {
+      async sendTrustStatusResponse(req, res) {
+        return sendLiveTrustStatusResponse(req, res, {
           exochainConnected: runtimeExochainConnectivityStatus.getConnected(),
           version: '1.0.0',
           uptimeSeconds: process.uptime(),

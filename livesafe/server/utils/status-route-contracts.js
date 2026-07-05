@@ -10,6 +10,13 @@ function buildMethodNotAllowedHandler() {
   };
 }
 
+function buildStatusRouteResponderError() {
+  const error = new Error("Status route responder failed.");
+  error.code = "STATUS_ROUTE_RESPONDER_FAILED";
+  error.status = 500;
+  return error;
+}
+
 function getStatusRouteContracts() {
   return [
     {
@@ -57,15 +64,27 @@ function registerStatusRouteContracts(app, responders) {
       throw new Error(`Missing status route responder: ${contract.responder}`);
     }
 
-    app.get(contract.path, (req, res) => {
+    app.get(contract.path, async (req, res, next) => {
       applyStatusRouteHeaders(res);
-      responder(req, res);
+      try {
+        await responder(req, res, next);
+      } catch {
+        const error = buildStatusRouteResponderError();
+
+        if (typeof next === "function") {
+          next(error);
+          return;
+        }
+
+        throw error;
+      }
     });
     app.all(contract.path, methodNotAllowed);
   }
 }
 
 module.exports = {
+  buildStatusRouteResponderError,
   getStatusRouteContracts,
   registerStatusRouteContracts,
 };
