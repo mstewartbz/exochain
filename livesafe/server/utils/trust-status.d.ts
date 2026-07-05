@@ -11,7 +11,7 @@ export interface TrustStatusPayloadOptions {
       | "adjacent-surface"
       | "imported-evidence"
       | "third-party-vendor";
-    public_claims_allowed: boolean;
+    public_claims_allowed?: boolean;
     can_read_exochain_core_state: boolean;
     can_write_exochain_core_state: boolean;
     wrapped_operations?: Array<

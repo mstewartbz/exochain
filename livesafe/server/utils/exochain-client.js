@@ -33,6 +33,8 @@ const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS = 5000;
 const PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_PROOF_TYPE =
   'ed25519-public-adapter-output-authorization';
 const SHA256_EVIDENCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const STRICT_UTC_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function isRequiredTransportIdentifier(value) {
   return (
@@ -118,6 +120,40 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseHash256Env(value) {
+  if (!SHA256_EVIDENCE_HASH_PATTERN.test(value)) {
+    return null;
+  }
+
+  const hex = value.slice('sha256:'.length);
+  const bytes = [];
+  for (let index = 0; index < hex.length; index += 2) {
+    bytes.push(Number.parseInt(hex.slice(index, index + 2), 16));
+  }
+
+  return { canonical: value, bytes };
+}
+
+function parseStrictUtcTimestampEnv(value) {
+  if (!STRICT_UTC_TIMESTAMP_PATTERN.test(value)) {
+    return null;
+  }
+
+  const physicalMs = Date.parse(value);
+  if (!Number.isSafeInteger(physicalMs) || physicalMs < 0) {
+    return null;
+  }
+
+  if (new Date(physicalMs).toISOString() !== value) {
+    return null;
+  }
+
+  return {
+    physical_ms: physicalMs,
+    logical: 0,
+  };
+}
+
 function getPublicAdapterOutputAuthorizationConfig() {
   const baseUrl =
     envString('EXOCHAIN_NODE_AVC_URL') || envString('EXOCHAIN_NODE_URL');
@@ -130,13 +166,17 @@ function getPublicAdapterOutputAuthorizationConfig() {
     envString('EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_TIMEOUT_MS'),
     PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DEFAULT_TIMEOUT_MS,
   );
+  const credentialHash = parseHash256Env(credentialId);
+  const evidenceHashValue = parseHash256Env(evidenceHash);
+  const expiresAtTimestamp = parseStrictUtcTimestampEnv(expiresAt);
 
   if (
     !baseUrl ||
     !bearer ||
-    !credentialId ||
-    !SHA256_EVIDENCE_HASH_PATTERN.test(evidenceHash) ||
-    !idempotencyKey
+    !credentialHash ||
+    !evidenceHashValue ||
+    !idempotencyKey ||
+    !expiresAtTimestamp
   ) {
     return null;
   }
@@ -144,10 +184,12 @@ function getPublicAdapterOutputAuthorizationConfig() {
   return {
     baseUrl,
     bearer,
-    credentialId,
-    evidenceHash,
+    credentialId: credentialHash.canonical,
+    credentialIdBytes: credentialHash.bytes,
+    evidenceHash: evidenceHashValue.canonical,
+    evidenceHashBytes: evidenceHashValue.bytes,
     idempotencyKey,
-    expiresAt: expiresAt || null,
+    expiresAt: expiresAtTimestamp,
     timeoutMs,
   };
 }
@@ -731,14 +773,11 @@ class ExochainClient {
       const body = {
         subject,
         audience,
-        credential_id: config.credentialId,
-        evidence_hash: config.evidenceHash,
+        credential_id: [...config.credentialIdBytes],
+        evidence_hash: [...config.evidenceHashBytes],
         idempotency_key: config.idempotencyKey,
+        expires_at: { ...config.expiresAt },
       };
-
-      if (config.expiresAt) {
-        body.expires_at = config.expiresAt;
-      }
 
       const response = await fetch(
         buildPublicAdapterOutputAuthorizationUrl(config.baseUrl),

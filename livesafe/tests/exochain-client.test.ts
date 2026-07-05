@@ -11,11 +11,13 @@ function repeatedHex(byte: number, length: number) {
 }
 
 const EVIDENCE_HASH_BYTES = repeatedByte(0xbb, 32);
+const CREDENTIAL_ID_BYTES = repeatedByte(0xbc, 32);
 const PROOF_HASH_BYTES = repeatedByte(0xcc, 32);
 const ACTION_COMMITMENT_HASH_BYTES = repeatedByte(0xdd, 32);
 const IDEMPOTENCY_KEY_HASH_BYTES = repeatedByte(0xee, 32);
 const ED25519_SIGNATURE_BYTES = repeatedByte(0xaa, 64);
 const EVIDENCE_HASH_HEX = repeatedHex(0xbb, 32);
+const CREDENTIAL_ID_HEX = repeatedHex(0xbc, 32);
 const PROOF_HASH_HEX = repeatedHex(0xcc, 32);
 const ED25519_SIGNATURE_HEX = repeatedHex(0xaa, 64);
 
@@ -49,7 +51,7 @@ const PUBLIC_ADAPTER_AUTHORIZATION_REST_CONFIG = {
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER:
     "secret-public-adapter-bearer",
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID:
-    "credential:livesafe-public-adapter-output",
+    `sha256:${CREDENTIAL_ID_HEX}`,
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH: `sha256:${EVIDENCE_HASH_HEX}`,
   EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_IDEMPOTENCY_KEY:
     "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
@@ -637,6 +639,55 @@ describe("EXOCHAIN client timestamp preservation", () => {
     }
   });
 
+  it.each([
+    {
+      label: "credential_id is not a strict sha256 hash",
+      override: {
+        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_ID:
+          "credential:livesafe-public-adapter-output-secret",
+      },
+      leaked: "livesafe-public-adapter-output-secret",
+    },
+    {
+      label: "evidence_hash is not a strict sha256 hash",
+      override: {
+        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EVIDENCE_HASH:
+          `sha256:${EVIDENCE_HASH_HEX.slice(0, 62)}secret`,
+      },
+      leaked: "secret",
+    },
+    {
+      label: "expires_at is not a strict timestamp",
+      override: {
+        EXOCHAIN_PUBLIC_ADAPTER_OUTPUT_EXPIRES_AT:
+          "not-a-timestamp-secret-expiry",
+      },
+      leaked: "secret-expiry",
+    },
+  ])("fails closed before REST transport when $label", async ({
+    override,
+    leaked,
+  }) => {
+    configurePublicAdapterAuthorizationEnv(override);
+    const client = new ExochainClient("http://example.invalid/graphql");
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await client.getPublicAdapterOutputAuthorization({
+      subject: "livesafe.ai",
+      audience: "https://livesafe.ai/api/trust/status",
+      currentAt: "2026-07-05T12:00:00.000Z",
+    });
+
+    expect(result).toEqual({ state: "unavailable", value: null });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(leaked);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(
+      "secret-public-adapter-bearer",
+    );
+  });
+
   it("posts public adapter-output authorization to the configured EXOCHAIN node REST route", async () => {
     configurePublicAdapterAuthorizationEnv();
     const client = new ExochainClient("http://example.invalid/graphql");
@@ -678,11 +729,13 @@ describe("EXOCHAIN client timestamp preservation", () => {
     expect(requestBody).toEqual({
       subject: "livesafe.ai",
       audience: "https://livesafe.ai/api/trust/status",
-      credential_id: "credential:livesafe-public-adapter-output",
-      evidence_hash:
-        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      credential_id: CREDENTIAL_ID_BYTES,
+      evidence_hash: EVIDENCE_HASH_BYTES,
       idempotency_key: "idem:livesafe-public-adapter-output:2026-07-05T12:00:00Z",
-      expires_at: "2026-07-05T12:05:00.000Z",
+      expires_at: {
+        physical_ms: Date.parse("2026-07-05T12:05:00.000Z"),
+        logical: 0,
+      },
     });
     expect(requestBody).not.toHaveProperty("issued_at");
     expect(requestBody).not.toHaveProperty("generated_at");

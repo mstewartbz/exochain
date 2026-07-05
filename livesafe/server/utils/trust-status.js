@@ -51,9 +51,9 @@ function isProductionEvidenceVerified(productionTrustEvidence) {
 }
 
 function publicClaimsReason({
+  exochainConnected,
   productionEvidenceVerified,
   runtimeAdapterVerified,
-  runtimePublicClaimsAllowed,
   publicAdapterOutputAuthorized,
 }) {
   if (!productionEvidenceVerified) {
@@ -64,15 +64,15 @@ function publicClaimsReason({
     return "Public trust claims remain inactive because EXOCHAIN production evidence is verified but the LiveSafe runtime adapter remains unverified.";
   }
 
-  if (!runtimePublicClaimsAllowed) {
-    return "Public trust claims remain inactive because the LiveSafe runtime adapter has not allowed public trust output.";
-  }
-
   if (!publicAdapterOutputAuthorized) {
     return "Public trust claims remain inactive because proof-bearing public adapter-output authorization has not been verified.";
   }
 
-  return "EXOCHAIN production evidence, LiveSafe runtime adapter gates, and proof-bearing public adapter-output authorization are verified.";
+  if (!exochainConnected) {
+    return "Public trust claims remain inactive until EXOCHAIN connectivity verifies.";
+  }
+
+  return "EXOCHAIN connectivity, EXOCHAIN production evidence, LiveSafe runtime adapter gates, and proof-bearing public adapter-output authorization are verified.";
 }
 
 function createTrustStatusPayload({
@@ -101,8 +101,6 @@ function createTrustStatusPayload({
   const productionEvidenceVerified = isProductionEvidenceVerified(
     resolvedProductionTrustEvidence,
   );
-  const runtimePublicClaimsAllowed =
-    resolvedRuntimeStatus.public_claims_allowed === true;
   const publicAdapterOutputAuthorizationDecision =
     evaluatePublicAdapterOutputAuthorization(adapterOutputAuthorization, {
       currentAt: generatedAt,
@@ -112,9 +110,9 @@ function createTrustStatusPayload({
   const publicAdapterOutputAuthorized =
     publicAdapterOutputAuthorizationDecision.allowed === true;
   const publicClaimsAllowed =
+    Boolean(exochainConnected) &&
     productionEvidenceVerified &&
     runtimeAdapterVerified &&
-    runtimePublicClaimsAllowed &&
     publicAdapterOutputAuthorized;
   const trustToken = publicClaimsAllowed ? VERIFIED_TOKEN : NOT_VERIFIED_TOKEN;
   const payload = {
@@ -152,9 +150,9 @@ function createTrustStatusPayload({
     frost_genesis_complete: productionEvidenceVerified,
     public_claims_allowed: publicClaimsAllowed,
     public_claims_reason: publicClaimsReason({
+      exochainConnected: Boolean(exochainConnected),
       productionEvidenceVerified,
       runtimeAdapterVerified,
-      runtimePublicClaimsAllowed,
       publicAdapterOutputAuthorized,
     }),
     source_basis: [

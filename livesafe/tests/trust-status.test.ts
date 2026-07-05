@@ -163,7 +163,7 @@ describe("trust status API contract", () => {
     ]);
     expect(payload.public_claims_allowed).toBe(false);
     expect(payload.public_claims_reason).toContain(
-      "runtime adapter has not allowed public trust output",
+      "proof-bearing public adapter-output authorization",
     );
   });
 
@@ -206,7 +206,7 @@ describe("trust status API contract", () => {
     expect(payload.internal_proof_complete).toBe(true);
     expect(payload.public_claims_allowed).toBe(false);
     expect(payload.public_claims_reason).toContain(
-      "runtime adapter has not allowed public trust output",
+      "proof-bearing public adapter-output authorization",
     );
     expect(payload.production_trust_observations).toEqual([
       "production_sentinel_quorum_health_below_bft_minimum",
@@ -387,6 +387,78 @@ describe("trust status API contract", () => {
     });
     expect(JSON.stringify(payload.public_adapter_output_authorization)).not.toContain(
       "signature",
+    );
+  });
+
+  it("denies public trust status when EXOCHAIN connectivity is false even with proof authorization", () => {
+    const payload = createTrustStatusPayload({
+      exochainConnected: false,
+      version: "1.0.0",
+      uptimeSeconds: 16,
+      generatedAt: "2026-07-05T12:00:00.000Z",
+      runtimeStatus: {
+        adapter_state: "verified",
+        surface_classification: "core-runtime-adapter",
+        public_claims_allowed: true,
+        can_read_exochain_core_state: true,
+        can_write_exochain_core_state: true,
+        disablement_path:
+          "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+        source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+      },
+      adapterOutputAuthorization: VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+      productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+    });
+
+    expect(payload.state).toBe("not-verified");
+    expect(payload.public_claims_allowed).toBe(false);
+    expect(payload.public_claims_reason).toContain("EXOCHAIN connectivity");
+  });
+
+  it.each([
+    {
+      label: "runtime public_claims_allowed false",
+      runtimeStatus: {
+        adapter_state: "verified" as const,
+        surface_classification: "core-runtime-adapter" as const,
+        public_claims_allowed: false,
+        can_read_exochain_core_state: true,
+        can_write_exochain_core_state: true,
+        disablement_path:
+          "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+        source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+      },
+    },
+    {
+      label: "runtime public_claims_allowed absent",
+      runtimeStatus: {
+        adapter_state: "verified" as const,
+        surface_classification: "core-runtime-adapter" as const,
+        can_read_exochain_core_state: true,
+        can_write_exochain_core_state: true,
+        disablement_path:
+          "Disable EXOCHAIN adapter environment variables and remove the trust-status route from the load balancer.",
+        source_basis: ["server/utils/livesafe-exochain-adapter.js"],
+      } as RuntimeStatus,
+    },
+  ])("allows verified public trust status with $label when proof authorization permits", ({
+    runtimeStatus,
+  }) => {
+    const payload = createTrustStatusPayload({
+      exochainConnected: true,
+      version: "1.0.0",
+      uptimeSeconds: 16,
+      generatedAt: "2026-07-05T12:00:00.000Z",
+      runtimeStatus,
+      adapterOutputAuthorization: VALID_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION,
+      productionTrustEvidence: VERIFIED_PRODUCTION_TRUST_EVIDENCE,
+    });
+
+    expect(payload.state).toBe("externally-verified");
+    expect(payload.machine_state).toBe("public_trust_claims_allowed");
+    expect(payload.public_claims_allowed).toBe(true);
+    expect(payload.public_claims_reason).toContain(
+      "proof-bearing public adapter-output authorization are verified",
     );
   });
 
