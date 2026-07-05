@@ -2844,17 +2844,21 @@ fn verify_issuer_registration_authority(
             "AVC registry unavailable while verifying issuer registration authority".into(),
         )
     })?;
-    exo_authority::chain::verify_chain(chain, &now, |did| registry.resolve_public_key(did))
-        .map_err(|error| {
-            tracing::warn!(
-                %error,
-                "rejected AVC issuer registration: authority chain failed verification"
-            );
-            (
-                StatusCode::FORBIDDEN,
-                "issuer registration authority chain failed verification".into(),
-            )
-        })?;
+    exo_authority::chain::verify_chain(chain, &now, |did| {
+        registry
+            .resolve_public_key(did)
+            .or_else(|| registry.resolve_receipt_validator_public_key(did))
+    })
+    .map_err(|error| {
+        tracing::warn!(
+            %error,
+            "rejected AVC issuer registration: authority chain failed verification"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            "issuer registration authority chain failed verification".into(),
+        )
+    })?;
 
     if !exo_authority::chain::has_permission(chain, &Permission::Govern) {
         return Err((
@@ -8318,6 +8322,62 @@ mod avc_issuer_registration_authority_tests {
         let result: AvcValidationResult =
             serde_json::from_slice(&body).expect("validation result body");
         assert_eq!(result.decision, AvcDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn issuer_registration_authority_verifies_against_startup_validator_key_set() {
+        let state = fresh_state();
+        let validator_kp = validator_keypair();
+        let issuer_did = new_issuer_did();
+        let issuer_kp = new_issuer_keypair();
+
+        state
+            .register_validator_public_keys([(validator_did(), validator_kp.public)])
+            .expect("startup validator public keys register");
+
+        let now = Timestamp::new(1_000, 0);
+        let expires = Timestamp::new(9_000_000, 0);
+        state
+            .grant_issuer_registration_authority(
+                operator_did(),
+                DelegateeKind::Human,
+                &validator_kp.public,
+                expires,
+                &now,
+                |payload| validator_kp.sign(payload),
+            )
+            .expect("grant issuer-registration authority");
+        let chain = state
+            .find_delegated_issuer_registration_chain(&operator_did())
+            .expect("delegated issuer-registration chain must be exportable");
+
+        let register_body = serde_json::json!({
+            "issuer_did": issuer_did.to_string(),
+            "public_key_hex": hex::encode(issuer_kp.public.as_bytes()),
+            "authority_chain": chain,
+            "granted_permissions": ["Read", "Write"],
+        });
+        let app = router_with_bearer_gate(Arc::clone(&state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/avc/issuers")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer vcg-006b-authority-test-token")
+                    .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        if status != StatusCode::OK {
+            let body = read_body(response).await;
+            panic!(
+                "expected startup validator key set to verify issuer-registration authority, got {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
     }
 
     /// A chain that verifies cryptographically but was never actually
