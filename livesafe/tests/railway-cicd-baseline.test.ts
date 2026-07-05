@@ -1,5 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = resolve(process.cwd(), "..");
@@ -55,6 +65,11 @@ function expectPromotionSmokePublicClaimsEnv(workflow: string, jobId: string): v
   expect(job, `${jobId} should run the smoke script for the selected target`).toContain(
     'scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"',
   );
+}
+
+function writeExecutable(filePath: string, content: string): void {
+  writeFileSync(filePath, content, "utf8");
+  chmodSync(filePath, 0o755);
 }
 
 describe("LiveSafe Railway CI/CD baseline", () => {
@@ -142,14 +157,15 @@ describe("LiveSafe Railway CI/CD baseline", () => {
       'railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID"',
     );
     expect(workflow).toContain(
-      'railway up livesafe --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID"',
+      'railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID"',
     );
     expect(workflow).toContain(
       'railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID"',
     );
     expect(workflow).toContain(
-      'railway up livesafe --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID"',
+      'railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID"',
     );
+    expect(workflow).not.toContain("railway up livesafe --path-as-root");
     expect(workflow).toContain(
       'scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"',
     );
@@ -179,17 +195,170 @@ describe("LiveSafe Railway CI/CD baseline", () => {
     expect(script).toContain(
       'railway service list --project "$RAILWAY_PROJECT_ID" --environment "$railway_environment_id" --json',
     );
+    expect(script).toContain(
+      'railway service status --project "$RAILWAY_PROJECT_ID" --environment "$railway_environment_id" --service "$LIVESAFE_SERVICE_ID" --json',
+    );
+    expect(script).toContain(
+      'railway service status --project "$RAILWAY_PROJECT_ID" --environment "$railway_environment_id" --service "$EXOCHAIN_NODE_SERVICE_ID" --json',
+    );
     expect(script).toContain('railway_environment_id="3dc06fb6-c3df-4fe4-8807-0da0e62e4028"');
     expect(script).toContain('railway_environment_id="a223bc12-fbe4-430f-abce-8e3ee7c9abd3"');
     expect(script).toContain('railway_environment_id="1e5153e1-15f4-4447-bf7c-029af33927fb"');
+    expect(script).toContain('LIVESAFE_SERVICE_ID="${LIVESAFE_SERVICE_ID:-8ed3bd1a-f872-4e22-9a39-ac38953fae26}"');
+    expect(script).toContain('EXOCHAIN_NODE_SERVICE_ID="${EXOCHAIN_NODE_SERVICE_ID:-4d8384d3-be5d-48d6-a914-97eb6133e53d}"');
     expect(script).toContain("deadline_seconds=");
     expect(script).toContain("while [ \"$SECONDS\" -lt \"$deadline_seconds\" ]; do");
     expect(script).toContain("sleep 10");
+    expect(script).toContain('.status == "SUCCESS"');
+    expect(script).toContain(".stopped == false");
     expect(script).toContain('curl -fsS "$livesafe_url/api/health"');
     expect(script).toContain('curl -fsS "$livesafe_url/api/trust/status"');
     expect(script).toContain("public_claims_allowed == false");
     expect(script).not.toContain("railway variable list");
     expect(script).not.toContain("--kv");
+  });
+
+  it("rejects a stopped latest deployment before URL health can pass", () => {
+    const testRoot = mkdtempSync(join(tmpdir(), "livesafe-railway-smoke-"));
+    const binDir = join(testRoot, "bin");
+    const railwayCallLog = join(testRoot, "railway.log");
+    const curlCallLog = join(testRoot, "curl.log");
+
+    mkdirSync(binDir);
+
+    writeExecutable(
+      join(binDir, "railway"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$RAILWAY_FAKE_CALL_LOG"
+
+case "\${1:-} \${2:-}" in
+  "service list")
+    cat <<'JSON'
+[
+  {
+    "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+    "name": "livesafe",
+    "status": "SUCCESS",
+    "deploymentStopped": false,
+    "deploymentId": "9a1cf48c-fbe3-4149-b6e3-a6dab107607c",
+    "latestDeployment": {
+      "id": "a595f677-fc70-43e5-b68c-f75fc8f84ce0",
+      "status": "FAILED",
+      "deploymentStopped": true
+    },
+    "url": "https://livesafe-development.up.railway.app"
+  },
+  {
+    "id": "4d8384d3-be5d-48d6-a914-97eb6133e53d",
+    "name": "exochain-node",
+    "status": "SUCCESS",
+    "deploymentStopped": false,
+    "deploymentId": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+    "latestDeployment": {
+      "id": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+      "status": "SUCCESS",
+      "deploymentStopped": false
+    }
+  },
+  { "id": "2ab3f445-d6f7-4245-940c-985a14e974f9", "name": "exochain-node-db", "status": "SUCCESS" },
+  { "id": "691122bb-025b-463d-8033-7f94f7678748", "name": "Postgres", "status": "SUCCESS" }
+]
+JSON
+    ;;
+  "service status")
+    service=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --service|-s)
+          shift
+          service="\${1:-}"
+          ;;
+      esac
+      shift || break
+    done
+
+    if [ "$service" = "8ed3bd1a-f872-4e22-9a39-ac38953fae26" ]; then
+      cat <<'JSON'
+{
+  "id": "8ed3bd1a-f872-4e22-9a39-ac38953fae26",
+  "name": "livesafe",
+  "deploymentId": "a595f677-fc70-43e5-b68c-f75fc8f84ce0",
+  "status": "FAILED",
+  "stopped": true
+}
+JSON
+    elif [ "$service" = "4d8384d3-be5d-48d6-a914-97eb6133e53d" ]; then
+      cat <<'JSON'
+{
+  "id": "4d8384d3-be5d-48d6-a914-97eb6133e53d",
+  "name": "exochain-node",
+  "deploymentId": "ec12cdf4-75e0-41a1-986c-c326aeec978f",
+  "status": "SUCCESS",
+  "stopped": false
+}
+JSON
+    else
+      printf 'unexpected service %s\\n' "$service" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf 'unexpected railway command: %s\\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`,
+    );
+
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$CURL_FAKE_CALL_LOG"
+url="\${@: -1}"
+
+case "$url" in
+  */api/health)
+    printf '%s\\n' '{"status":"ok","database":"connected","exochain_connected":true}'
+    ;;
+  */api/trust/status)
+    printf '%s\\n' '{"exochain_connected":true,"verified_runtime_adapter":true,"runtime_adapter_state":"verified","public_claims_allowed":false}'
+    ;;
+  *)
+    printf 'unexpected curl url: %s\\n' "$url" >&2
+    exit 2
+    ;;
+esac
+`,
+    );
+
+    try {
+      const result = spawnSync(
+        "/usr/bin/env",
+        ["bash", resolve(repoRoot, "scripts/livesafe-railway-smoke.sh"), "development"],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CURL_FAKE_CALL_LOG: curlCallLog,
+            LIVESAFE_RAILWAY_SMOKE_TIMEOUT_SECONDS: "60",
+            PATH: `${binDir}:${process.env.PATH ?? ""}`,
+            RAILWAY_FAKE_CALL_LOG: railwayCallLog,
+          },
+        },
+      );
+
+      expect(result.status, result.stdout + result.stderr).not.toBe(0);
+      expect(result.stderr).toContain("livesafe");
+      expect(readFileSync(railwayCallLog, "utf8")).toContain("service status");
+      expect(existsSync(curlCallLog) ? readFileSync(curlCallLog, "utf8") : "").toBe(
+        "",
+      );
+    } finally {
+      rmSync(testRoot, { force: true, recursive: true });
+    }
   });
 
   it("supports explicit fail-closed and authorized-green public-claims smoke contracts", () => {

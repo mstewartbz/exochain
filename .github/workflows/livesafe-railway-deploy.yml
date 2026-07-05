@@ -88,7 +88,7 @@ jobs:
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "development exochain-node ${GITHUB_SHA}"
       - name: Deploy livesafe to development
         run: |
-          railway up livesafe --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "development livesafe ${GITHUB_SHA}"
+          railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "development livesafe ${GITHUB_SHA}"
       - name: Smoke development
         run: scripts/livesafe-railway-smoke.sh "development"
 
@@ -117,7 +117,7 @@ jobs:
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} exochain-node ${GITHUB_SHA}"
       - name: Promote livesafe
         run: |
-          railway up livesafe --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${GITHUB_SHA}"
+          railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${GITHUB_SHA}"
       - name: Smoke staging
         run: scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"
 
@@ -146,6 +146,6 @@ jobs:
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} exochain-node ${GITHUB_SHA}"
       - name: Promote livesafe
         run: |
-          railway up livesafe --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${GITHUB_SHA}"
+          railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${GITHUB_SHA}"
       - name: Smoke production
         run: scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"
