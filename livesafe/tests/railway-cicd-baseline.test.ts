@@ -12,6 +12,40 @@ function readRepoFile(relativePath: string): string {
   return readFileSync(absolutePath, "utf8");
 }
 
+function readWorkflowJob(workflow: string, jobId: string): string {
+  const jobStart = workflow.indexOf(`  ${jobId}:\n`);
+
+  expect(jobStart, `${jobId} job should exist`).toBeGreaterThanOrEqual(0);
+
+  const afterJobStart = jobStart + 1;
+  const nextJobMatch = workflow.slice(afterJobStart).match(/\n  [a-z0-9-]+:\n/);
+  const jobEnd = nextJobMatch?.index;
+
+  if (jobEnd === undefined) {
+    return workflow.slice(jobStart);
+  }
+
+  return workflow.slice(jobStart, afterJobStart + jobEnd);
+}
+
+function expectRailwayAuthSecret(
+  workflow: string,
+  jobId: string,
+  secretName: string,
+): void {
+  const job = readWorkflowJob(workflow, jobId);
+
+  expect(job, `${jobId} should use ${secretName} for Railway auth`).toContain(
+    `RAILWAY_TOKEN: \${{ secrets.${secretName} }}`,
+  );
+  expect(job, `${jobId} must not use the stale global Railway token`).not.toContain(
+    "secrets.RAILWAY_TOKEN",
+  );
+  expect(job, `${jobId} must not require a Railway API token fallback`).not.toContain(
+    "secrets.RAILWAY_API_TOKEN",
+  );
+}
+
 describe("LiveSafe Railway CI/CD baseline", () => {
   it("declares the ARMORCLOUD LiveSafe project environments and service names without secrets", () => {
     const manifest = JSON.parse(
@@ -75,10 +109,20 @@ describe("LiveSafe Railway CI/CD baseline", () => {
     expect(workflow).toContain(
       "LIVESAFE_SERVICE_ID: 8ed3bd1a-f872-4e22-9a39-ac38953fae26",
     );
-    expect(workflow).toContain("secrets.RAILWAY_TOKEN");
     expect(workflow).toContain("environment: livesafe-development");
     expect(workflow).toContain("environment: livesafe-staging");
     expect(workflow).toContain("environment: livesafe-production");
+    expectRailwayAuthSecret(
+      workflow,
+      "deploy-development",
+      "RAILWAY_DEVELOPMENT_TOKEN",
+    );
+    expectRailwayAuthSecret(workflow, "deploy-staging", "RAILWAY_STAGING_TOKEN");
+    expectRailwayAuthSecret(
+      workflow,
+      "deploy-production",
+      "RAILWAY_PRODUCTION_TOKEN",
+    );
     expect(workflow).toContain("verify-livesafe:");
     expect(workflow).toContain("uses: ./.github/workflows/livesafe-ci.yml");
     expect(workflow).toContain("commit_sha: ${{ inputs.commit_sha || github.sha }}");
