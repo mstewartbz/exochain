@@ -75,8 +75,6 @@ jobs:
     needs: verify-livesafe
     runs-on: ubuntu-latest
     environment: livesafe-development
-    env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEVELOPMENT_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -85,12 +83,18 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli@4.65.0
       - name: Deploy exochain-node to development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEVELOPMENT_TOKEN }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "development exochain-node ${GITHUB_SHA}"
       - name: Deploy livesafe to development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEVELOPMENT_TOKEN }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_DEVELOPMENT_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "development livesafe ${GITHUB_SHA}"
       - name: Smoke development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEVELOPMENT_TOKEN }}
         run: scripts/livesafe-railway-smoke.sh "development"
 
   deploy-staging:
@@ -100,7 +104,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: livesafe-staging
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
       TARGET_ENVIRONMENT: staging
       TARGET_ENVIRONMENT_ID: a223bc12-fbe4-430f-abce-8e3ee7c9abd3
       LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED: ${{ inputs.expected_public_claims_allowed || 'false' }}
@@ -136,15 +139,19 @@ jobs:
         run: npm install -g @railway/cli@4.65.0
       - name: Promote exochain-node
         env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
           SAFE_DEPLOY_SHA: ${{ steps.safe-ref.outputs.sha }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} exochain-node ${SAFE_DEPLOY_SHA}"
       - name: Promote livesafe
         env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
           SAFE_DEPLOY_SHA: ${{ steps.safe-ref.outputs.sha }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${SAFE_DEPLOY_SHA}"
       - name: Smoke staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
         run: scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"
 
   deploy-production:
@@ -154,7 +161,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: livesafe-production
     env:
-      RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
       TARGET_ENVIRONMENT: production
       TARGET_ENVIRONMENT_ID: 1e5153e1-15f4-4447-bf7c-029af33927fb
       LIVESAFE_EXPECT_PUBLIC_CLAIMS_ALLOWED: ${{ inputs.expected_public_claims_allowed || 'false' }}
@@ -190,13 +196,17 @@ jobs:
         run: npm install -g @railway/cli@4.65.0
       - name: Promote exochain-node
         env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
           SAFE_DEPLOY_SHA: ${{ steps.safe-ref.outputs.sha }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$EXOCHAIN_NODE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} exochain-node ${SAFE_DEPLOY_SHA}"
       - name: Promote livesafe
         env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
           SAFE_DEPLOY_SHA: ${{ steps.safe-ref.outputs.sha }}
         run: |
           railway up . --path-as-root --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENVIRONMENT_ID" --service "$LIVESAFE_SERVICE_ID" --detach --json -m "${TARGET_ENVIRONMENT} livesafe ${SAFE_DEPLOY_SHA}"
       - name: Smoke production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
         run: scripts/livesafe-railway-smoke.sh "$TARGET_ENVIRONMENT"
