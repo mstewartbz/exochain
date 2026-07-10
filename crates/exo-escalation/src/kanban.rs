@@ -97,7 +97,7 @@ pub fn move_case(
 ) -> Result<(), EscalationError> {
     // Find and remove the case from its current column
     let mut found_case: Option<EscalationCase> = None;
-    for (_col, cases) in board.columns.iter_mut() {
+    for cases in board.columns.values_mut() {
         if let Some(pos) = cases.iter().position(|c| c.id == *case_id) {
             found_case = Some(cases.remove(pos));
             break;
