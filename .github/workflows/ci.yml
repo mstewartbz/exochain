@@ -91,9 +91,22 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: Free coverage runner disk
+        run: |
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup
+          df -h /
       - name: Install cargo-tarpaulin
         run: bash tools/ci_cargo_retry.sh cargo install cargo-tarpaulin --version 0.35.4 --locked
       - name: Run coverage
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         # exochain-wasm: excluded — wasm bindings are exercised by the JS
         # bridge tests (Gate 21), not tarpaulin.
         # exochain-proofs: excluded — the entire crate is gated behind

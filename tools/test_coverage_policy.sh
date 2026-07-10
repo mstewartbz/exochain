@@ -145,6 +145,17 @@ coverage_gate_block=$(
 
 [[ -n "$coverage_gate_block" ]] || fail "CI coverage gate block is missing"
 
+grep -F 'Free coverage runner disk' <<<"$coverage_gate_block" >/dev/null \
+  || fail "coverage gate must reclaim hosted-runner disk before instrumentation"
+for preinstalled_path in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; do
+  grep -F "$preinstalled_path" <<<"$coverage_gate_block" >/dev/null \
+    || fail "coverage gate disk cleanup must remove $preinstalled_path"
+done
+grep -F 'CARGO_INCREMENTAL: "0"' <<<"$coverage_gate_block" >/dev/null \
+  || fail "coverage gate must disable incremental artifacts"
+grep -F 'CARGO_PROFILE_TEST_DEBUG: "0"' <<<"$coverage_gate_block" >/dev/null \
+  || fail "coverage gate must disable test debug artifacts"
+
 if grep -F -- '--skip-clean' <<<"$coverage_gate_block" >/dev/null; then
   fail "default workspace coverage gate must clean instrumentation before measuring the 90% threshold"
 fi

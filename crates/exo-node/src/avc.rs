@@ -3439,7 +3439,7 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -3450,13 +3450,14 @@ mod tests {
     };
     use exo_authority::permission::Permission;
     use exo_avc::{
-        AVC_LLM_USAGE_EVIDENCE_DOMAIN, AVC_SCHEMA_VERSION, AuthorityScope, AutonomyLevel,
-        AvcActionDescriptor, AvcActionRequest, AvcConstraints, AvcDecision, AvcDraft,
-        AvcReasonCode, AvcReceiptEvidenceSubject, AvcReceiptExternalTimestampProofKind,
-        AvcRevocationReason, AvcSubjectKind, DataClass, DelegatedIntent, EncryptedPayloadRef,
-        LlmUsageCustodyMode, LlmUsageEvidence, LlmUsageEvidenceEnvelope, ProviderUsageMetrics,
-        avc_action_descriptor_hash, avc_llm_usage_action_request, create_trust_receipt, issue_avc,
-        llm_usage_evidence_hash, llm_usage_evidence_signature_payload, revoke_avc,
+        AVC_LLM_USAGE_EVIDENCE_DOMAIN, AVC_RECEIPT_SIGNING_DOMAIN, AVC_SCHEMA_VERSION,
+        AuthorityScope, AutonomyLevel, AvcActionDescriptor, AvcActionRequest, AvcConstraints,
+        AvcDecision, AvcDraft, AvcReasonCode, AvcReceiptEvidenceSubject,
+        AvcReceiptExternalTimestampProofKind, AvcRevocationReason, AvcSubjectKind, DataClass,
+        DelegatedIntent, EncryptedPayloadRef, LlmUsageCustodyMode, LlmUsageEvidence,
+        LlmUsageEvidenceEnvelope, ProviderUsageMetrics, avc_action_descriptor_hash,
+        avc_llm_usage_action_request, create_trust_receipt, issue_avc, llm_usage_evidence_hash,
+        llm_usage_evidence_signature_payload, revoke_avc,
     };
     use exo_core::{Hash256, Signature, Timestamp, crypto, crypto::KeyPair};
     use tower::ServiceExt;
@@ -4201,6 +4202,156 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(invalid_error.contains("failed to validate AVC durable registry"));
+    }
+
+    #[test]
+    fn file_durable_registry_loads_pre_lynk_receipt_without_rewriting_identity() {
+        #[derive(Serialize)]
+        struct PreLynkExtendedReceiptSigningPayload<'a> {
+            domain: &'static str,
+            schema_version: u16,
+            credential_id: &'a Hash256,
+            action_id: Option<&'a Hash256>,
+            action_commitment_hash: Option<&'a Hash256>,
+            action_descriptor: Option<&'a AvcActionDescriptor>,
+            action_descriptor_hash: Option<&'a Hash256>,
+            previous_receipt_hash: Option<&'a Hash256>,
+            timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+            external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
+            validator_did: &'a Did,
+            decision: &'a AvcDecision,
+            reason_codes: &'a [AvcReasonCode],
+            created_at: &'a Timestamp,
+            validation_hash: &'a Hash256,
+        }
+
+        #[derive(Serialize)]
+        struct PreLynkReceiptWire<'a> {
+            schema_version: u16,
+            receipt_id: &'a Hash256,
+            credential_id: &'a Hash256,
+            action_id: Option<&'a Hash256>,
+            action_commitment_hash: Option<&'a Hash256>,
+            action_descriptor: Option<&'a AvcActionDescriptor>,
+            action_descriptor_hash: Option<&'a Hash256>,
+            previous_receipt_hash: Option<&'a Hash256>,
+            timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+            external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
+            validator_did: &'a Did,
+            decision: &'a AvcDecision,
+            reason_codes: &'a [AvcReasonCode],
+            created_at: &'a Timestamp,
+            validation_hash: &'a Hash256,
+            signature: &'a Signature,
+        }
+
+        #[derive(Serialize)]
+        struct PreLynkDurableStateWire<'a> {
+            credentials: &'a BTreeMap<Hash256, AutonomousVolitionCredential>,
+            revocations: &'a BTreeMap<Hash256, AvcRevocation>,
+            receipts: BTreeMap<Hash256, PreLynkReceiptWire<'a>>,
+            receipt_chain_head: Option<Hash256>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE);
+        let mut registry = InMemoryAvcRegistry::new();
+        registry.put_public_key(Did::new("did:exo:issuer").unwrap(), issuer_keypair().public);
+        let credential = baseline_credential();
+        let credential_id = registry.put_credential(credential.clone()).unwrap();
+        let validation = AvcValidationResult {
+            credential_id,
+            decision: AvcDecision::Allow,
+            reason_codes: vec![AvcReasonCode::Valid],
+            normalized_holder_did: credential.subject_did,
+            valid_until: credential.expires_at,
+            receipt: None,
+        };
+        let mut receipt = create_trust_receipt_with_evidence(
+            &validation,
+            Some(Hash256::from_bytes([0x71; 32])),
+            AvcTrustReceiptEvidence {
+                action_commitment_hash: Some(Hash256::from_bytes([0x72; 32])),
+                action_descriptor: None,
+                llm_usage_evidence_hash: None,
+                previous_receipt_hash: None,
+                timestamp_provenance: Some(AvcReceiptTimestampProvenance::FixedTestTimestamp),
+                external_timestamp_proof: None,
+            },
+            validator_did(),
+            Timestamp::new(1_500_001, 0),
+            |payload| validator_keypair().sign(payload),
+        )
+        .unwrap();
+        let historical_payload = PreLynkExtendedReceiptSigningPayload {
+            domain: AVC_RECEIPT_SIGNING_DOMAIN,
+            schema_version: receipt.schema_version,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            action_commitment_hash: receipt.action_commitment_hash.as_ref(),
+            action_descriptor: receipt.action_descriptor.as_ref(),
+            action_descriptor_hash: receipt.action_descriptor_hash.as_ref(),
+            previous_receipt_hash: receipt.previous_receipt_hash.as_ref(),
+            timestamp_provenance: receipt.timestamp_provenance.as_ref(),
+            external_timestamp_proof: receipt.external_timestamp_proof.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+        };
+        let mut historical_bytes = Vec::new();
+        ciborium::into_writer(&historical_payload, &mut historical_bytes).unwrap();
+        receipt.receipt_id = Hash256::digest(&historical_bytes);
+        receipt.signature = validator_keypair().sign(&historical_bytes);
+        let historical_id = receipt.receipt_id;
+        let historical_signature = receipt.signature.clone();
+
+        let durable = registry.durable_state();
+        let historical_wire_receipt = PreLynkReceiptWire {
+            schema_version: receipt.schema_version,
+            receipt_id: &receipt.receipt_id,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            action_commitment_hash: receipt.action_commitment_hash.as_ref(),
+            action_descriptor: receipt.action_descriptor.as_ref(),
+            action_descriptor_hash: receipt.action_descriptor_hash.as_ref(),
+            previous_receipt_hash: receipt.previous_receipt_hash.as_ref(),
+            timestamp_provenance: receipt.timestamp_provenance.as_ref(),
+            external_timestamp_proof: receipt.external_timestamp_proof.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+            signature: &receipt.signature,
+        };
+        let mut historical_receipts = BTreeMap::new();
+        historical_receipts.insert(historical_id, historical_wire_receipt);
+        let historical_wire_state = PreLynkDurableStateWire {
+            credentials: &durable.credentials,
+            revocations: &durable.revocations,
+            receipts: historical_receipts,
+            receipt_chain_head: Some(historical_id),
+        };
+        let mut historical_durable_cbor = Vec::new();
+        ciborium::into_writer(&historical_wire_state, &mut historical_durable_cbor).unwrap();
+        assert!(
+            !historical_durable_cbor
+                .windows("llm_usage_evidence_hash".len())
+                .any(|window| window == b"llm_usage_evidence_hash"),
+            "the pre-LYNK durable fixture must omit the later wire field"
+        );
+        std::fs::write(&path, historical_durable_cbor).unwrap();
+
+        let mut loaded = load_file_durable_registry(&path).unwrap();
+        assert_eq!(loaded.get_receipt(&historical_id), Some(receipt));
+        assert_eq!(loaded.receipt_chain_head(), Some(historical_id));
+        loaded.put_receipt_validator_public_key(validator_did(), validator_keypair().public);
+        loaded.validate_loaded_receipts().unwrap();
+        let revalidated = loaded.get_receipt(&historical_id).unwrap();
+        assert_eq!(revalidated.receipt_id, historical_id);
+        assert_eq!(revalidated.signature, historical_signature);
     }
 
     #[tokio::test]
