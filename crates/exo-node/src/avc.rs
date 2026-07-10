@@ -3439,7 +3439,7 @@ pub fn avc_router(state: Arc<AvcApiState>) -> Router {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -4225,6 +4225,34 @@ mod tests {
             validation_hash: &'a Hash256,
         }
 
+        #[derive(Serialize)]
+        struct PreLynkReceiptWire<'a> {
+            schema_version: u16,
+            receipt_id: &'a Hash256,
+            credential_id: &'a Hash256,
+            action_id: Option<&'a Hash256>,
+            action_commitment_hash: Option<&'a Hash256>,
+            action_descriptor: Option<&'a AvcActionDescriptor>,
+            action_descriptor_hash: Option<&'a Hash256>,
+            previous_receipt_hash: Option<&'a Hash256>,
+            timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+            external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
+            validator_did: &'a Did,
+            decision: &'a AvcDecision,
+            reason_codes: &'a [AvcReasonCode],
+            created_at: &'a Timestamp,
+            validation_hash: &'a Hash256,
+            signature: &'a Signature,
+        }
+
+        #[derive(Serialize)]
+        struct PreLynkDurableStateWire<'a> {
+            credentials: &'a BTreeMap<Hash256, AutonomousVolitionCredential>,
+            revocations: &'a BTreeMap<Hash256, AvcRevocation>,
+            receipts: BTreeMap<Hash256, PreLynkReceiptWire<'a>>,
+            receipt_chain_head: Option<Hash256>,
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(AVC_REGISTRY_DURABLE_STATE_FILE);
         let mut registry = InMemoryAvcRegistry::new();
@@ -4279,10 +4307,42 @@ mod tests {
         let historical_id = receipt.receipt_id;
         let historical_signature = receipt.signature.clone();
 
-        let mut durable = registry.durable_state();
-        durable.receipts.insert(historical_id, receipt.clone());
-        durable.receipt_chain_head = Some(historical_id);
-        persist_file_durable_registry_state(&durable, &path).unwrap();
+        let durable = registry.durable_state();
+        let historical_wire_receipt = PreLynkReceiptWire {
+            schema_version: receipt.schema_version,
+            receipt_id: &receipt.receipt_id,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            action_commitment_hash: receipt.action_commitment_hash.as_ref(),
+            action_descriptor: receipt.action_descriptor.as_ref(),
+            action_descriptor_hash: receipt.action_descriptor_hash.as_ref(),
+            previous_receipt_hash: receipt.previous_receipt_hash.as_ref(),
+            timestamp_provenance: receipt.timestamp_provenance.as_ref(),
+            external_timestamp_proof: receipt.external_timestamp_proof.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+            signature: &receipt.signature,
+        };
+        let mut historical_receipts = BTreeMap::new();
+        historical_receipts.insert(historical_id, historical_wire_receipt);
+        let historical_wire_state = PreLynkDurableStateWire {
+            credentials: &durable.credentials,
+            revocations: &durable.revocations,
+            receipts: historical_receipts,
+            receipt_chain_head: Some(historical_id),
+        };
+        let mut historical_durable_cbor = Vec::new();
+        ciborium::into_writer(&historical_wire_state, &mut historical_durable_cbor).unwrap();
+        assert!(
+            !historical_durable_cbor
+                .windows("llm_usage_evidence_hash".len())
+                .any(|window| window == b"llm_usage_evidence_hash"),
+            "the pre-LYNK durable fixture must omit the later wire field"
+        );
+        std::fs::write(&path, historical_durable_cbor).unwrap();
 
         let mut loaded = load_file_durable_registry(&path).unwrap();
         assert_eq!(loaded.get_receipt(&historical_id), Some(receipt));
