@@ -437,7 +437,10 @@ impl AvcTrustReceipt {
             return Ok(Some(current_payload));
         }
 
-        if !self.has_extended_evidence() || self.llm_usage_evidence_hash.is_some() {
+        if self.schema_version != AVC_SCHEMA_VERSION
+            || !self.has_extended_evidence()
+            || self.llm_usage_evidence_hash.is_some()
+        {
             return Ok(None);
         }
 
@@ -467,12 +470,12 @@ impl AvcTrustReceipt {
         }
     }
 
-    /// Returns true when `receipt_id` matches a supported signing payload.
+    /// Returns true when `receipt_id` matches the current canonical signing payload.
     ///
     /// # Errors
     /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
     pub fn verify_id(&self) -> Result<bool, AvcError> {
-        Ok(self.signing_payload_matching_receipt_id()?.is_some())
+        Ok(self.recompute_id()? == self.receipt_id)
     }
 }
 

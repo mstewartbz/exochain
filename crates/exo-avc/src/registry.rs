@@ -648,6 +648,7 @@ impl InMemoryAvcRegistry {
     }
 
     fn validate_receipt_structural(&self, receipt: &AvcTrustReceipt) -> Result<Vec<u8>, AvcError> {
+        Self::validate_receipt_schema(receipt)?;
         let payload = receipt.signing_payload()?;
         if Hash256::digest(&payload) != receipt.receipt_id {
             return Err(AvcError::InvalidInput {
@@ -665,6 +666,7 @@ impl InMemoryAvcRegistry {
         &self,
         receipt: &AvcTrustReceipt,
     ) -> Result<Vec<u8>, AvcError> {
+        Self::validate_receipt_schema(receipt)?;
         let payload = receipt
             .signing_payload_matching_receipt_id()?
             .ok_or_else(|| AvcError::InvalidInput {
@@ -675,6 +677,16 @@ impl InMemoryAvcRegistry {
             })?;
         self.validate_receipt_references(receipt)?;
         Ok(payload)
+    }
+
+    fn validate_receipt_schema(receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+        if receipt.schema_version != crate::credential::AVC_SCHEMA_VERSION {
+            return Err(AvcError::UnsupportedSchema {
+                got: receipt.schema_version,
+                supported: crate::credential::AVC_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
     }
 
     fn validate_receipt_references(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
