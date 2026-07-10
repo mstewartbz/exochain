@@ -54,6 +54,9 @@ pub const GRAPH_EXPLORER_MAX_GRAPH_VIEW_ROWS_READ: u16 = 100;
 
 static ARTIFACT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+pub(crate) static GRAPH_EXPLORER_TARGET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GraphExplorerError {
     #[error("graph_explorer_live_export_blocked_missing_approval")]
@@ -2806,6 +2809,9 @@ mod tests {
 
     #[test]
     fn graph_explorer_artifacts_generate_under_target() {
+        let _guard = GRAPH_EXPLORER_TARGET_LOCK
+            .lock()
+            .expect("graph explorer target lock should not be poisoned");
         let artifacts = generate_unavailable_graph_explorer_artifacts("graph-explorer-test")
             .expect("artifacts");
         assert_eq!(artifacts.snapshot_path, GRAPH_EXPLORER_SNAPSHOT_PATH);
@@ -2831,6 +2837,9 @@ mod tests {
 
     #[test]
     fn graph_explorer_diagnostic_artifacts_generate_under_target() {
+        let _guard = GRAPH_EXPLORER_TARGET_LOCK
+            .lock()
+            .expect("graph explorer target lock should not be poisoned");
         let artifacts =
             generate_diagnostic_context_graph_explorer_artifacts("diagnostic-graph-capture")
                 .expect("artifacts");
