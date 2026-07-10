@@ -340,6 +340,25 @@ struct ExtendedReceiptSigningPayload<'a> {
     validation_hash: &'a Hash256,
 }
 
+#[derive(Serialize)]
+struct PreLynkExtendedReceiptSigningPayload<'a> {
+    domain: &'static str,
+    schema_version: u16,
+    credential_id: &'a Hash256,
+    action_id: Option<&'a Hash256>,
+    action_commitment_hash: Option<&'a Hash256>,
+    action_descriptor: Option<&'a AvcActionDescriptor>,
+    action_descriptor_hash: Option<&'a Hash256>,
+    previous_receipt_hash: Option<&'a Hash256>,
+    timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+    external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
+    validator_did: &'a Did,
+    decision: &'a AvcDecision,
+    reason_codes: &'a [AvcReasonCode],
+    created_at: &'a Timestamp,
+    validation_hash: &'a Hash256,
+}
+
 impl AvcTrustReceipt {
     #[must_use]
     pub fn has_extended_evidence(&self) -> bool {
@@ -404,13 +423,56 @@ impl AvcTrustReceipt {
         Ok(Hash256::digest(&self.signing_payload()?))
     }
 
-    /// Returns true when `receipt_id` matches the canonical hash of the
-    /// signed fields.
+    /// Return the supported signing payload whose digest matches the stored
+    /// receipt ID, preferring the current canonical representation.
+    ///
+    /// Pre-LYNK extended receipts are matched only when no LLM usage evidence
+    /// hash is present. Current receipt generation remains canonical.
+    ///
+    /// # Errors
+    /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
+    pub(crate) fn signing_payload_matching_receipt_id(&self) -> Result<Option<Vec<u8>>, AvcError> {
+        let current_payload = self.signing_payload()?;
+        if Hash256::digest(&current_payload) == self.receipt_id {
+            return Ok(Some(current_payload));
+        }
+
+        if !self.has_extended_evidence() || self.llm_usage_evidence_hash.is_some() {
+            return Ok(None);
+        }
+
+        let historical_payload = PreLynkExtendedReceiptSigningPayload {
+            domain: AVC_RECEIPT_SIGNING_DOMAIN,
+            schema_version: self.schema_version,
+            credential_id: &self.credential_id,
+            action_id: self.action_id.as_ref(),
+            action_commitment_hash: self.action_commitment_hash.as_ref(),
+            action_descriptor: self.action_descriptor.as_ref(),
+            action_descriptor_hash: self.action_descriptor_hash.as_ref(),
+            previous_receipt_hash: self.previous_receipt_hash.as_ref(),
+            timestamp_provenance: self.timestamp_provenance.as_ref(),
+            external_timestamp_proof: self.external_timestamp_proof.as_ref(),
+            validator_did: &self.validator_did,
+            decision: &self.decision,
+            reason_codes: &self.reason_codes,
+            created_at: &self.created_at,
+            validation_hash: &self.validation_hash,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&historical_payload, &mut bytes)?;
+        if Hash256::digest(&bytes) == self.receipt_id {
+            Ok(Some(bytes))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Returns true when `receipt_id` matches a supported signing payload.
     ///
     /// # Errors
     /// Returns [`AvcError::Serialization`] when CBOR encoding fails.
     pub fn verify_id(&self) -> Result<bool, AvcError> {
-        Ok(self.recompute_id()? == self.receipt_id)
+        Ok(self.signing_payload_matching_receipt_id()?.is_some())
     }
 }
 

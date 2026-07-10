@@ -647,15 +647,15 @@ impl InMemoryAvcRegistry {
         Ok(())
     }
 
-    fn validate_receipt_structural(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
-        if !receipt.verify_id()? {
-            return Err(AvcError::InvalidInput {
+    fn validate_receipt_structural(&self, receipt: &AvcTrustReceipt) -> Result<Vec<u8>, AvcError> {
+        let payload = receipt
+            .signing_payload_matching_receipt_id()?
+            .ok_or_else(|| AvcError::InvalidInput {
                 reason: format!(
                     "receipt {} for credential {} has an invalid content id",
                     receipt.receipt_id, receipt.credential_id
                 ),
-            });
-        }
+            })?;
         if receipt.signature.is_empty() {
             return Err(AvcError::InvalidInput {
                 reason: format!("receipt {} has an empty signature", receipt.receipt_id),
@@ -669,11 +669,11 @@ impl InMemoryAvcRegistry {
                 ),
             });
         }
-        Ok(())
+        Ok(payload)
     }
 
     fn validate_receipt(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
-        self.validate_receipt_structural(receipt)?;
+        let payload = self.validate_receipt_structural(receipt)?;
         let public_key = self
             .receipt_validator_public_keys
             .get(&receipt.validator_did)
@@ -683,7 +683,6 @@ impl InMemoryAvcRegistry {
                     receipt.validator_did
                 ),
             })?;
-        let payload = receipt.signing_payload()?;
         if !crypto::verify(&payload, &receipt.signature, public_key) {
             return Err(AvcError::InvalidInput {
                 reason: format!("receipt signature for {} is invalid", receipt.receipt_id),
