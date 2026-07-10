@@ -10,7 +10,7 @@ The application is currently deployed in a traditional Web2/Cloud architecture
 for rapid testing, UX validation, and clinical API mocking:
 
 - **Frontend / Client UI:** Vercel (React + Vite PWA, mobile-first)
-- **Backend / API:** Railway (`livesafe-api` Node.js + Express container)
+- **Backend / API:** Railway (`livesafe` Node.js + Express container)
 - **Database:** Railway Postgres (PostgreSQL for off-chain operational data)
 
 ### EXOCHAIN Production Evidence and LiveSafe Boundary
@@ -22,10 +22,11 @@ probes returned `ok`, the AVC root-trust bundle verified with EXOCHAIN
 bundle id is
 `7d9954a797ef244c15ad1b733cf77598125ccef0f812a404137e827c192d6a58`.
 
-LiveSafe remains an adjacent surface. Public EXOCHAIN trust claims stay inactive
-until the LiveSafe runtime adapter is verified and explicitly allows public
-output. Raw sensitive personal, medical, trustee, PACE, vault, and emergency
-access data stays off-chain.
+LiveSafe remains an adjacent surface. Public EXOCHAIN trust claims are evaluated
+per environment and remain fail-closed unless EXOCHAIN connectivity, production
+evidence, the verified LiveSafe runtime adapter, and proof-bearing public-output
+authorization all verify. Raw sensitive personal, medical, trustee, PACE, vault,
+and emergency access data stays off-chain.
 
 ## Quick Start (Local Dev)
 
@@ -51,9 +52,9 @@ docker build -t livesafe .
 Current deployment evidence points to Railway:
 
 - Public health endpoint:
-  `https://livesafe-api-production.up.railway.app/api/health`
+  `https://livesafe-production.up.railway.app/api/health`
 - Railway project: `livesafe` in the `ARMORCLOUD` workspace
-- Active Railway service: `livesafe-api`
+- Active Railway service: `livesafe`
 - Railway database service: `Postgres`
 - Active deploy control: `railway.json`
 - Live Railway ids belong in closeout evidence and must be read from
@@ -70,9 +71,11 @@ Current local control status:
 - Repository owner: `github.com/bob-stewart/livesafe`
 - EXOCHAIN reference repository: `github.com/exochain/exochain`
 - Classification: adjacent surface
-- Runtime adapter status: no adapter is wired in this repo
-- Public trust posture: inactive until a verified adapter and fail-closed tests
-  exist
+- Runtime adapter status: verified by `config/exochain-primitives.json` and the
+  fail-closed adapter contract tests
+- Public trust posture: evaluated per environment and fail-closed; inspect
+  `/api/trust/status` during each deployment rather than inferring authorization
+  from repository state
 
 Run the baseline quality gate with:
 
@@ -80,7 +83,8 @@ Run the baseline quality gate with:
 npm run quality
 ```
 
-The quality gate runs context validation, TypeScript type checking, and tests.
+The quality gate runs dependency audits, context validation, TypeScript type
+checking, Vitest, Rust formatting and Clippy checks, and Rust tests.
 
 ## Local Evidence
 
