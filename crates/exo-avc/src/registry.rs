@@ -1159,29 +1159,7 @@ mod tests {
         receipt
     }
 
-    fn pre_lynk_extended_receipt_for_credential(
-        credential_id: Hash256,
-        validator_keypair: &KeyPair,
-    ) -> AvcTrustReceipt {
-        let mut receipt = AvcTrustReceipt {
-            schema_version: crate::credential::AVC_SCHEMA_VERSION,
-            receipt_id: Hash256::ZERO,
-            credential_id,
-            action_id: Some(h256(0x21)),
-            action_commitment_hash: Some(h256(0x22)),
-            action_descriptor: None,
-            action_descriptor_hash: None,
-            llm_usage_evidence_hash: None,
-            previous_receipt_hash: None,
-            timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
-            external_timestamp_proof: None,
-            validator_did: did("validator"),
-            decision: AvcDecision::Allow,
-            reason_codes: vec![AvcReasonCode::Valid],
-            created_at: ts(0x24),
-            validation_hash: h256(0x25),
-            signature: Signature::empty(),
-        };
+    fn pre_lynk_extended_receipt_signing_payload(receipt: &AvcTrustReceipt) -> Vec<u8> {
         let payload = PreLynkExtendedReceiptSigningPayload {
             domain: AVC_RECEIPT_SIGNING_DOMAIN,
             schema_version: receipt.schema_version,
@@ -1201,9 +1179,55 @@ mod tests {
         };
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&payload, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn pre_lynk_extended_receipt_for_credential(
+        credential_id: Hash256,
+        validator_keypair: &KeyPair,
+        previous_receipt_hash: Option<Hash256>,
+        differentiator: u8,
+    ) -> AvcTrustReceipt {
+        let mut receipt = AvcTrustReceipt {
+            schema_version: crate::credential::AVC_SCHEMA_VERSION,
+            receipt_id: Hash256::ZERO,
+            credential_id,
+            action_id: Some(h256(differentiator)),
+            action_commitment_hash: Some(h256(differentiator.wrapping_add(1))),
+            action_descriptor: None,
+            action_descriptor_hash: None,
+            llm_usage_evidence_hash: None,
+            previous_receipt_hash,
+            timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+            external_timestamp_proof: None,
+            validator_did: did("validator"),
+            decision: AvcDecision::Allow,
+            reason_codes: vec![AvcReasonCode::Valid],
+            created_at: ts(u64::from(differentiator) + 3),
+            validation_hash: h256(differentiator.wrapping_add(4)),
+            signature: Signature::empty(),
+        };
+        let bytes = pre_lynk_extended_receipt_signing_payload(&receipt);
         receipt.receipt_id = Hash256::digest(&bytes);
         receipt.signature = validator_keypair.sign(&bytes);
         receipt
+    }
+
+    fn assert_pre_lynk_chain_preserved(
+        registry: &InMemoryAvcRegistry,
+        first: &AvcTrustReceipt,
+        second: &AvcTrustReceipt,
+    ) {
+        let stored_first = registry.get_receipt(&first.receipt_id).unwrap();
+        assert_eq!(stored_first.receipt_id, first.receipt_id);
+        assert_eq!(stored_first.signature, first.signature);
+        assert_eq!(stored_first.previous_receipt_hash, None);
+
+        let stored_second = registry.get_receipt(&second.receipt_id).unwrap();
+        assert_eq!(stored_second.receipt_id, second.receipt_id);
+        assert_eq!(stored_second.signature, second.signature);
+        assert_eq!(stored_second.previous_receipt_hash, Some(first.receipt_id));
+        assert_eq!(registry.receipt_chain_head(), Some(second.receipt_id));
     }
 
     fn resign_receipt(receipt: &mut AvcTrustReceipt, validator_keypair: &KeyPair) {
@@ -1912,7 +1936,8 @@ mod tests {
         let (credential_id, issuer_keypair) =
             register_sample_credential_and_issuer_key(&mut durable_source);
         let validator_keypair = keypair(0x33);
-        let receipt = pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair);
+        let receipt =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x21);
         let mut state = durable_source.durable_state();
         state.receipts.insert(receipt.receipt_id, receipt.clone());
         state.receipt_chain_head = Some(receipt.receipt_id);
@@ -1931,6 +1956,176 @@ mod tests {
 
         assert_eq!(live.get_receipt(&receipt.receipt_id), Some(receipt.clone()));
         assert_eq!(live.receipt_chain_head(), Some(receipt.receipt_id));
+    }
+
+    #[test]
+    fn durable_state_rejects_tampered_pre_lynk_extended_receipt_signed_field() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, _issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let mut receipt =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x31);
+        let historical_id = receipt.receipt_id;
+        let historical_signature = receipt.signature.clone();
+        receipt.validation_hash = h256(0xFE);
+        assert_eq!(receipt.receipt_id, historical_id);
+        assert_eq!(receipt.signature, historical_signature);
+
+        let mut state = durable_source.durable_state();
+        state.receipts.insert(historical_id, receipt);
+        state.receipt_chain_head = Some(historical_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("invalid content id")),
+            "tampering with a signed historical field must invalidate the retained receipt ID"
+        );
+    }
+
+    #[test]
+    fn apply_durable_state_rejects_forged_pre_lynk_receipt_signature_and_preserves_target() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let attacker_keypair = keypair(0x44);
+        let mut forged_receipt =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x41);
+        let legitimate_signature = forged_receipt.signature.clone();
+        let historical_payload = pre_lynk_extended_receipt_signing_payload(&forged_receipt);
+        forged_receipt.signature = attacker_keypair.sign(&historical_payload);
+        assert_ne!(forged_receipt.signature, legitimate_signature);
+
+        let mut state = durable_source.durable_state();
+        state
+            .receipts
+            .insert(forged_receipt.receipt_id, forged_receipt.clone());
+        state.receipt_chain_head = Some(forged_receipt.receipt_id);
+
+        let structural = InMemoryAvcRegistry::from_durable_state(state.clone()).unwrap();
+        assert_eq!(
+            structural.get_receipt(&forged_receipt.receipt_id),
+            Some(forged_receipt.clone())
+        );
+
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+        let existing_credential_id = live.put_credential(sample_credential()).unwrap();
+        assert_eq!(existing_credential_id, credential_id);
+        let existing_receipt = receipt_for_credential(credential_id, &validator_keypair);
+        live.put_receipt(existing_receipt).unwrap();
+        let target_before_apply = live.durable_state();
+
+        let err = live.apply_durable_state(state).unwrap_err();
+        match err {
+            AvcError::InvalidInput { reason } => assert_eq!(
+                reason,
+                format!(
+                    "receipt signature for {} is invalid",
+                    forged_receipt.receipt_id
+                )
+            ),
+            other => panic!("expected forged historical receipt signature error, got {other:?}"),
+        }
+        assert_eq!(live.durable_state(), target_before_apply);
+        assert_eq!(
+            live.resolve_receipt_validator_public_key(&did("validator")),
+            Some(validator_keypair.public)
+        );
+    }
+
+    #[test]
+    fn durable_state_preserves_two_receipt_pre_lynk_chain() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let first =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x51);
+        let second = pre_lynk_extended_receipt_for_credential(
+            credential_id,
+            &validator_keypair,
+            Some(first.receipt_id),
+            0x61,
+        );
+        let mut state = durable_source.durable_state();
+        state.receipts.insert(first.receipt_id, first.clone());
+        state.receipts.insert(second.receipt_id, second.clone());
+        state.receipt_chain_head = Some(second.receipt_id);
+
+        let restored = InMemoryAvcRegistry::from_durable_state(state.clone()).unwrap();
+        assert_pre_lynk_chain_preserved(&restored, &first, &second);
+
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+        live.apply_durable_state(state).unwrap();
+        assert_pre_lynk_chain_preserved(&live, &first, &second);
+    }
+
+    #[test]
+    fn lynk_hashed_receipts_never_use_pre_lynk_fallback() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let mut current =
+            chained_receipt_for_credential(credential_id, &validator_keypair, None, 0x71);
+        current.llm_usage_evidence_hash = Some(h256(0xA1));
+        resign_receipt(&mut current, &validator_keypair);
+
+        let mut valid_state = durable_source.durable_state();
+        valid_state
+            .receipts
+            .insert(current.receipt_id, current.clone());
+        valid_state.receipt_chain_head = Some(current.receipt_id);
+
+        let restored = InMemoryAvcRegistry::from_durable_state(valid_state.clone()).unwrap();
+        assert_eq!(
+            restored.get_receipt(&current.receipt_id),
+            Some(current.clone())
+        );
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+        live.apply_durable_state(valid_state).unwrap();
+        assert_eq!(live.get_receipt(&current.receipt_id), Some(current.clone()));
+
+        let mut tampered = current.clone();
+        tampered.llm_usage_evidence_hash = Some(h256(0xA2));
+        let mut tampered_state = durable_source.durable_state();
+        tampered_state
+            .receipts
+            .insert(tampered.receipt_id, tampered.clone());
+        tampered_state.receipt_chain_head = Some(tampered.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(tampered_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("invalid content id")),
+            "a mutated LYNK evidence hash must invalidate the current receipt ID"
+        );
+
+        let mut historical_id_forgery = current.clone();
+        let historical_payload = pre_lynk_extended_receipt_signing_payload(&historical_id_forgery);
+        historical_id_forgery.receipt_id = Hash256::digest(&historical_payload);
+        historical_id_forgery.signature = validator_keypair.sign(&historical_payload);
+        assert!(historical_id_forgery.llm_usage_evidence_hash.is_some());
+        assert_ne!(historical_id_forgery.receipt_id, current.receipt_id);
+
+        let mut historical_id_state = durable_source.durable_state();
+        historical_id_state.receipts.insert(
+            historical_id_forgery.receipt_id,
+            historical_id_forgery.clone(),
+        );
+        historical_id_state.receipt_chain_head = Some(historical_id_forgery.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(historical_id_state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("invalid content id")),
+            "pre-LYNK payload matching must remain disabled when LYNK evidence is present"
+        );
     }
 
     #[test]
