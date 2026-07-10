@@ -42,6 +42,11 @@ for package_dir in livesafe livesafe/client livesafe/server livesafe/responder c
     || fail "$lock root package must declare UNLICENSED"
 done
 
+grep -F 'license = "UNLICENSED"' livesafe/Cargo.toml >/dev/null \
+  || fail 'livesafe/Cargo.toml must declare UNLICENSED'
+grep -F 'publish = false' livesafe/Cargo.toml >/dev/null \
+  || fail 'livesafe/Cargo.toml must disable publishing'
+
 apache_spdx='SPDX-License-Identifier: Apache-''2.0'
 apache_grant='Licensed under the Apache'' License'
 if git grep -n -e "$apache_spdx" -e "$apache_grant" -- livesafe cybermedica; then
@@ -61,5 +66,21 @@ grep -F '`livesafe/LICENSE`' README.md >/dev/null \
   || fail 'README must cite the LiveSafe license'
 grep -F '`cybermedica/LICENSE`' README.md >/dev/null \
   || fail 'README must cite the CyberMedica license'
+
+license_section="$(
+  awk '
+    /^## License$/ { in_license = 1 }
+    in_license { print }
+    in_license && /^---$/ { exit }
+  ' README.md
+)"
+printf '%s\n' "$license_section" | grep -F '[`livesafe/`](livesafe/)' >/dev/null \
+  || fail 'README License section must identify livesafe/'
+printf '%s\n' "$license_section" | grep -F '[`cybermedica/`](cybermedica/)' >/dev/null \
+  || fail 'README License section must identify cybermedica/'
+printf '%s\n' "$license_section" | grep -F '[livesafe/LICENSE](livesafe/LICENSE)' >/dev/null \
+  || fail 'README License section must cite the LiveSafe license'
+printf '%s\n' "$license_section" | grep -F '[cybermedica/LICENSE](cybermedica/LICENSE)' >/dev/null \
+  || fail 'README License section must cite the CyberMedica license'
 
 printf 'proprietary license boundary test passed\n'

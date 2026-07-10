@@ -354,8 +354,10 @@ Float arithmetic is denied workspace-wide via `#[deny(clippy::float_arithmetic)]
 
 ## License
 
-Apache-2.0 for all of this repository **except** the [`livesafe/`](livesafe/) subtree, which
-is proprietary and commercial (all rights reserved) — see [livesafe/LICENSE](livesafe/LICENSE).
+Apache-2.0 applies to EXOCHAIN core. The [`livesafe/`](livesafe/) and
+[`cybermedica/`](cybermedica/) subtrees are proprietary and commercial (all
+rights reserved); see [livesafe/LICENSE](livesafe/LICENSE) and
+[cybermedica/LICENSE](cybermedica/LICENSE).
 See also [LICENSE](LICENSE) and [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
 
 ---
