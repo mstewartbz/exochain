@@ -1992,6 +1992,10 @@ mod tests {
         let validator_keypair = keypair(0x33);
         let receipt =
             pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x21);
+        assert!(
+            !receipt.verify_id().unwrap(),
+            "public receipt ID verification must remain current-format only"
+        );
         let mut state = durable_source.durable_state();
         state.receipts.insert(receipt.receipt_id, receipt.clone());
         state.receipt_chain_head = Some(receipt.receipt_id);
@@ -2010,6 +2014,32 @@ mod tests {
 
         assert_eq!(live.get_receipt(&receipt.receipt_id), Some(receipt.clone()));
         assert_eq!(live.receipt_chain_head(), Some(receipt.receipt_id));
+    }
+
+    #[test]
+    fn durable_state_rejects_pre_lynk_receipt_with_unsupported_schema() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, _issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let mut receipt =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x22);
+        let unsupported = crate::credential::AVC_SCHEMA_VERSION + 1;
+        receipt.schema_version = unsupported;
+        let historical_payload = pre_lynk_extended_receipt_signing_payload(&receipt);
+        receipt.receipt_id = Hash256::digest(&historical_payload);
+        receipt.signature = validator_keypair.sign(&historical_payload);
+
+        let mut state = durable_source.durable_state();
+        state.receipts.insert(receipt.receipt_id, receipt.clone());
+        state.receipt_chain_head = Some(receipt.receipt_id);
+
+        let err = InMemoryAvcRegistry::from_durable_state(state).unwrap_err();
+        assert!(
+            matches!(err, AvcError::UnsupportedSchema { got, supported }
+                if got == unsupported && supported == crate::credential::AVC_SCHEMA_VERSION),
+            "historical compatibility must not admit unsupported receipt schemas"
+        );
     }
 
     #[test]
