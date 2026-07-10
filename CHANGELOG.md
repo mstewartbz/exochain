@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Aligned Rust workspace, path dependencies, SDK protocol constants, Python,
   npm, WASM, generated SDK artifacts, and lockfiles at stable `v0.2.2`.
+- Bundled the repository Apache-2.0 license in the TypeScript SDK and LYNK npm
+  candidates, with repository and release-workflow guards that prevent
+  license-less package tarballs.
 - Corrected release documentation to match dry-run behavior and GitHub's
   one-of environment-reviewer semantics; repository protection settings remain
   external evidence that must be verified before a live release.

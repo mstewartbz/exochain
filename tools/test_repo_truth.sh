@@ -114,9 +114,24 @@ check_package_license() {
     || fail "$package_file license must match workspace license $workspace_license, got $package_license"
 }
 
+check_package_license_artifact() {
+  local package_dir="$1"
+  local package_file="$package_dir/package.json"
+  local package_license_file="$package_dir/LICENSE"
+
+  [ -f "$package_license_file" ] || fail "$package_license_file is missing from the npm package source"
+  cmp -s LICENSE "$package_license_file" \
+    || fail "$package_license_file must exactly match the repository Apache-2.0 LICENSE"
+  jq -e '.files | index("LICENSE") != null' "$package_file" >/dev/null \
+    || fail "$package_file must explicitly include LICENSE in the npm package"
+}
+
 check_package_license packages/exochain-sdk/package.json
+check_package_license packages/exochain-llm-proxy/package.json
 check_package_license packages/exochain-wasm/wasm/package.json
 check_package_license demo/packages/exochain-wasm/package.json
+check_package_license_artifact packages/exochain-sdk
+check_package_license_artifact packages/exochain-llm-proxy
 
 grep -F 'cargo clippy --workspace --all-targets -- -D warnings' .github/workflows/ci.yml >/dev/null \
   || fail "CI clippy gate must cover all workspace targets"

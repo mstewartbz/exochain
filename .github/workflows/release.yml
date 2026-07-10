@@ -643,7 +643,7 @@ jobs:
           if (manifest.version !== process.env.RELEASE_VERSION) {
             throw new Error(`LYNK package version ${manifest.version} must match release ${process.env.RELEASE_VERSION}`);
           }
-          const requiredFiles = ['dist', 'README.md', 'AGENTS.md', 'examples', 'snippets'];
+          const requiredFiles = ['LICENSE', 'dist', 'README.md', 'AGENTS.md', 'examples', 'snippets'];
           for (const required of requiredFiles) {
             if (!manifest.files.includes(required)) {
               throw new Error(`LYNK package files list must include ${required}`);
