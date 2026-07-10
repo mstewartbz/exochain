@@ -71,6 +71,12 @@ if grep -F 'draft: ${{ inputs.dry_run }}' "$workflow" >/dev/null; then
   fail "dry-run releases must not create draft GitHub Releases"
 fi
 
+if grep -F 'approved by maintainer' "$workflow" >/dev/null; then
+  fail "workflow source must not claim a maintainer approval supplied by repository settings"
+fi
+grep -Fi 'repository settings determine whether approval is required' "$workflow" >/dev/null \
+  || fail "release workflow must distinguish its environment gate from configured approval"
+
 grep -F 'does not create a GitHub Release' <<<"$versioning_text" >/dev/null \
   || fail "VERSIONING.md must state that dry runs do not create GitHub Releases"
 grep -F 'still traverses the `release` environment' <<<"$versioning_text" >/dev/null \
