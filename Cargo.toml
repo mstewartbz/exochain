@@ -48,10 +48,11 @@ members = [
     "crates/exo-economy",
     "crates/exo-root",
 ]
-# The livesafe/ subtree is a proprietary commercial application (see
-# livesafe/LICENSE), not part of the Apache-2.0 Rust workspace. Its nested
-# Cargo manifest is deliberately excluded so the constitutional cargo gates
-# (build/test/clippy/deny/doc --workspace) never reach into it.
+# The livesafe/ and cybermedica/ subtrees are proprietary commercial
+# applications (see their subtree LICENSE files), not part of the Apache-2.0
+# Rust workspace. LiveSafe's nested Cargo manifest is deliberately excluded so
+# the constitutional cargo gates (build/test/clippy/deny/doc --workspace) never
+# reach into it; CyberMedica has no Cargo manifest.
 exclude = ["livesafe"]
 
 [workspace.package]

@@ -17,10 +17,14 @@ describe("LiveSafe context control documents", () => {
     const content = readDoc(relativePath);
 
     expect(content).toContain("Current deployment evidence points to Railway");
-    expect(content).toContain("https://livesafe-api-production.up.railway.app/api/health");
+    expect(content).toContain("https://livesafe-production.up.railway.app/api/health");
+    expect(content).not.toContain("https://livesafe-api-production.up.railway.app");
     expect(content).toContain("Railway project: `livesafe`");
     expect(content).toContain("ARMORCLOUD");
     expect(content).toContain("Railway Postgres");
+    expect(content).toContain("Active Railway service: `livesafe`");
+    expect(content).toContain("Runtime adapter status: verified");
+    expect(content).toContain("Public trust posture: evaluated per environment and fail-closed");
     expect(content).toContain("Live Railway ids belong in closeout evidence");
     expect(content).toContain("Historical Fly.io artifacts remain in-repo");
     expect(content).not.toContain("**Backend / API:** Fly.io");

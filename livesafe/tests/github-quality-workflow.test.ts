@@ -3,6 +3,20 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("GitHub quality workflow", () => {
+  it("keeps every LiveSafe package audit in the canonical quality gate", () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(process.cwd(), "package.json"), "utf8"),
+    );
+
+    expect(packageJson.scripts["audit:deps"]).toBe(
+      "npm audit --package-lock-only --audit-level=low && " +
+        "npm --prefix client audit --package-lock-only --audit-level=low && " +
+        "npm --prefix responder audit --package-lock-only --audit-level=low && " +
+        "npm --prefix server audit --package-lock-only --audit-level=low",
+    );
+    expect(packageJson.scripts.quality).toContain("npm run audit:deps");
+  });
+
   it("installs server dependencies before root quality tests import server routes", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/livesafe-ci.yml"),

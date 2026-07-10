@@ -39,7 +39,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Workspace tests | 6,236 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Latest published release | `v0.2.1-beta` (GitHub Release published 2026-07-08; `exochain-core` on crates.io and `@exochain/llm-proxy` on npm resolve the same version) | `gh release list`; `cargo search exochain-core`; `npm view @exochain/llm-proxy version` |
-| License | Apache-2.0 | `Cargo.toml` |
+| License | Apache-2.0 for EXOCHAIN core; proprietary terms for `livesafe/` and `cybermedica/` | `Cargo.toml`; `livesafe/LICENSE`; `cybermedica/LICENSE` |
 | Live node health | Not inferred from repository state; verify each target at deploy or release time | `tools/verify_live_node_claim.sh` |
 
 ### What is verified today

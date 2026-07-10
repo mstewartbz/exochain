@@ -49,6 +49,8 @@ HEADER_LINES = [
 EXCLUDED_PREFIXES = (
     "coverage/",
     "demo/coverage/",
+    "livesafe/",
+    "cybermedica/",
     "packages/exochain-sdk/dist/",
     "packages/exochain-sdk/dist-test/",
     "command-base/.claude/reports/",
