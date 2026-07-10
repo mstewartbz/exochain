@@ -1,6 +1,3 @@
-/**
- * Vote primitives for governance decisions.
- */
 import type { Did, VoteChoiceValue } from '../types.js';
 /** Enum-like namespace for vote choices. Also usable as a type alias. */
 export declare const VoteChoice: {

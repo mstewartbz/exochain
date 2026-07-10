@@ -25,6 +25,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-10
+
+### Security / Correctness
+
+- Restored pre-LYNK schema-v1 extended AVC receipts through a durable-load-only
+  compatibility path that verifies signatures against the exact historical
+  bytes matching each stored content ID. Current receipt generation, public ID
+  verification, live writes, LYNK receipts, and unsupported schemas remain on
+  the canonical fail-closed path.
+- Updated LiveSafe's direct and transitive dependency set to resolve all npm
+  audit findings, including current Axios, React Router, Vite, PostCSS,
+  Nodemailer, UUID, and Multer lines. The canonical LiveSafe quality gate now
+  audits the root, client, responder, and server package locks at low severity.
+
+### Licensing
+
+- Applied the LiveSafe proprietary license boundary to the `cybermedica/`
+  subtree, replaced residual Apache file grants in both proprietary subtrees,
+  marked every package root `UNLICENSED`, excluded both subtrees from the
+  Apache header utility, and added a CI boundary guard.
+
+### Release / CI
+
+- Aligned Rust workspace, path dependencies, SDK protocol constants, Python,
+  npm, WASM, generated SDK artifacts, and lockfiles at stable `v0.2.2`.
+- Corrected release documentation to match dry-run behavior and GitHub's
+  one-of environment-reviewer semantics; repository protection settings remain
+  external evidence that must be verified before a live release.
+- Reclaimed runner disk before scoped tarpaulin coverage so the required
+  coverage gate can complete without exhausting the hosted runner filesystem.
+
 ## [0.2.1-beta] - 2026-07-08
 
 ### Added

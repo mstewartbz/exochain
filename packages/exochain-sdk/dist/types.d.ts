@@ -49,6 +49,39 @@ export interface HealthResponse {
     readonly version: string;
     readonly uptime: number;
 }
+/** AVC route paths advertised by `/.well-known/exochain.json`. */
+export interface ExochainAvcDiscoveryRoutes {
+    readonly issue: string;
+    readonly validate: string;
+    readonly receipts_emit: string;
+    readonly receipts_get: string;
+    readonly protocol: string;
+}
+/** Public route paths advertised by the canonical EXOCHAIN node. */
+export interface ExochainDiscoveryRoutes {
+    readonly health: string;
+    readonly ready: string;
+    readonly avc: ExochainAvcDiscoveryRoutes;
+}
+/** SDK package locations advertised by the canonical EXOCHAIN node. */
+export interface ExochainSdkDiscovery {
+    readonly rust: string;
+    readonly typescript: string;
+    readonly python: string;
+}
+/** MCP capability metadata; public_transport false means discoverable only. */
+export interface ExochainMcpDiscovery {
+    readonly public_transport: boolean;
+    readonly transports: readonly string[];
+    readonly capabilities: readonly string[];
+}
+/** Public EXOCHAIN discovery document. */
+export interface ExochainDiscoveryResponse {
+    readonly base_url: string;
+    readonly routes: ExochainDiscoveryRoutes;
+    readonly sdk: ExochainSdkDiscovery;
+    readonly mcp: ExochainMcpDiscovery;
+}
 /** EXOCHAIN economy object kinds stored behind the HonorGood adapter routes. */
 export type EconomyObjectKind = 'mission' | 'contribution_receipt' | 'legacy_receipt' | 'honorgood_ruleset' | 'value_contribution_node' | 'contribution_offer' | 'contribution_acceptance' | 'bailment_terms' | 'bailment_wrapper' | 'adoption_event' | 'use_event' | 'value_event' | 'mission_settlement' | 'automated_settlement_event';
 /** Hash-linked anchor returned when EXOCHAIN records an economy object. */

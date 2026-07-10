@@ -159,6 +159,11 @@ if [ "$README_VERACITY_GATE" = "on" ]; then
     || fail "README architecture test count is not repo-truth derived"
   grep -F "CI pipeline ($expected_gates numbered quality gates plus required aggregator)" README.md >/dev/null \
     || fail "README repository-structure gate count is not repo-truth derived"
+  grep -F "**$expected_gates numbered CI quality gates** plus the required \"All Constitutional Gates\" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings" README.md >/dev/null \
+    || fail "README must separate defined CI gates from GitHub merge enforcement"
+  if grep -F "defined and enforced" README.md >/dev/null; then
+    fail "README must not infer GitHub merge enforcement from workflow source"
+  fi
   grep -F "Quality Gates](governance/quality_gates.md) — $expected_gates numbered CI gates plus required aggregator" README.md >/dev/null \
     || fail "README governance-link gate count is not repo-truth derived"
 

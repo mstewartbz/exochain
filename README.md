@@ -48,7 +48,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings
 - **Traceability matrix** maps 119 requirements — see `governance/traceability_matrix.md`
 - **Threat model** covers 17 threats tracked: 17 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths

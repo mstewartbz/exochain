@@ -1,13 +1,3 @@
-/**
- * Consent bailment builder.
- *
- * A bailment represents scoped, time-bounded consent from a bailor to a
- * bailee. `BailmentBuilder` mirrors the Rust SDK's builder pattern and
- * produces a {@link BailmentProposal} whose `proposalId` is a content-
- * addressed SHA-256 over the canonical fields. Callers must provide the
- * HLC timestamp from their deterministic execution context; this SDK does
- * not read wall-clock time while constructing consent records.
- */
 import type { Did, Hash256 } from '../types.js';
 export interface HlcTimestamp {
     readonly physicalMs: number;

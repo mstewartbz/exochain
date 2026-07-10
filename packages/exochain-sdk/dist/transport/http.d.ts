@@ -1,10 +1,3 @@
-/**
- * HTTP transport for the `exo-gateway` REST API.
- *
- * Uses the global `fetch` which is available in Node 18+ and all modern
- * browsers. No third-party HTTP library is used to keep the SDK dependency-
- * free.
- */
 import type { HealthResponse } from '../types.js';
 import { type JsonObject } from '../validation.js';
 /** Options for {@link HttpTransport}. */

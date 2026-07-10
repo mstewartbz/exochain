@@ -1,10 +1,3 @@
-/**
- * Governance decisions — build, cast votes, check quorum.
- *
- * Mirrors the Rust SDK's `governance` module. Decision IDs are content-
- * addressed (SHA-256 over the canonical title/description/proposer payload),
- * votes are appended in-order, and duplicate voters are rejected.
- */
 import type { Did, Hash256, QuorumResult } from '../types.js';
 import { Vote } from './vote.js';
 /** Lifecycle states a decision may be in. */
