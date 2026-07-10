@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 test("release artifacts are present and agent discoverable", async () => {
   for (const path of [
+    "LICENSE",
     "README.md",
     "AGENTS.md",
     "snippets/env-template.md",

@@ -114,9 +114,24 @@ check_package_license() {
     || fail "$package_file license must match workspace license $workspace_license, got $package_license"
 }
 
+check_package_license_artifact() {
+  local package_dir="$1"
+  local package_file="$package_dir/package.json"
+  local package_license_file="$package_dir/LICENSE"
+
+  [ -f "$package_license_file" ] || fail "$package_license_file is missing from the npm package source"
+  cmp -s LICENSE "$package_license_file" \
+    || fail "$package_license_file must exactly match the repository Apache-2.0 LICENSE"
+  jq -e '.files | index("LICENSE") != null' "$package_file" >/dev/null \
+    || fail "$package_file must explicitly include LICENSE in the npm package"
+}
+
 check_package_license packages/exochain-sdk/package.json
+check_package_license packages/exochain-llm-proxy/package.json
 check_package_license packages/exochain-wasm/wasm/package.json
 check_package_license demo/packages/exochain-wasm/package.json
+check_package_license_artifact packages/exochain-sdk
+check_package_license_artifact packages/exochain-llm-proxy
 
 grep -F 'cargo clippy --workspace --all-targets -- -D warnings' .github/workflows/ci.yml >/dev/null \
   || fail "CI clippy gate must cover all workspace targets"
@@ -159,6 +174,11 @@ if [ "$README_VERACITY_GATE" = "on" ]; then
     || fail "README architecture test count is not repo-truth derived"
   grep -F "CI pipeline ($expected_gates numbered quality gates plus required aggregator)" README.md >/dev/null \
     || fail "README repository-structure gate count is not repo-truth derived"
+  grep -F "**$expected_gates numbered CI quality gates** plus the required \"All Constitutional Gates\" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings" README.md >/dev/null \
+    || fail "README must separate defined CI gates from GitHub merge enforcement"
+  if grep -F "defined and enforced" README.md >/dev/null; then
+    fail "README must not infer GitHub merge enforcement from workflow source"
+  fi
   grep -F "Quality Gates](governance/quality_gates.md) — $expected_gates numbered CI gates plus required aggregator" README.md >/dev/null \
     || fail "README governance-link gate count is not repo-truth derived"
 

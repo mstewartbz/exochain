@@ -1,18 +1,3 @@
-/**
- * Ed25519 Identity — a DID paired with a keypair.
- *
- * Built on the Web Crypto API, which supports Ed25519 natively on Node 20+
- * and modern browsers. The DID is derived deterministically from the raw
- * public-key bytes as a local SDK DID:
- *
- * ```text
- * did:exo: + first 16 hex chars of BLAKE3(public_key_bytes)
- * ```
- *
- * This matches the Rust and Python SDK derivation vectors. Use
- * {@link Identity.fromResolvedKeypair} when a gateway or resolver has already
- * bound the supplied public key to an externally resolved fabric DID.
- */
 import type { Did } from '../types.js';
 /**
  * Derive `did:exo:<first 16 hex chars of BLAKE3(publicKey)>`.

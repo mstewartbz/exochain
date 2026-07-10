@@ -35,7 +35,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 469 | `git ls-files 'crates/**/*.rs'` |
-| Rust LOC | 385376 | `git ls-files 'crates/**/*.rs'` + `wc -l` |
+| Rust LOC | 385381 | `git ls-files 'crates/**/*.rs'` + `wc -l` |
 | Workspace tests | 6,236 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Latest published release | `v0.2.1-beta` (GitHub Release published 2026-07-08; `exochain-core` on crates.io and `@exochain/llm-proxy` on npm resolve the same version) | `gh release list`; `cargo search exochain-core`; `npm view @exochain/llm-proxy version` |
@@ -48,7 +48,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings
 - **Traceability matrix** maps 119 requirements — see `governance/traceability_matrix.md`
 - **Threat model** covers 17 threats tracked: 17 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
@@ -124,7 +124,7 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 385376 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 385381 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
          production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
          SNARK/STARK/ZKML skeletons, 6,236 listed workspace tests
@@ -354,8 +354,10 @@ Float arithmetic is denied workspace-wide via `#[deny(clippy::float_arithmetic)]
 
 ## License
 
-Apache-2.0 for all of this repository **except** the [`livesafe/`](livesafe/) subtree, which
-is proprietary and commercial (all rights reserved) — see [livesafe/LICENSE](livesafe/LICENSE).
+Apache-2.0 applies to EXOCHAIN core. The [`livesafe/`](livesafe/) and
+[`cybermedica/`](cybermedica/) subtrees are proprietary and commercial (all
+rights reserved); see [livesafe/LICENSE](livesafe/LICENSE) and
+[cybermedica/LICENSE](cybermedica/LICENSE).
 See also [LICENSE](LICENSE) and [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
 
 ---

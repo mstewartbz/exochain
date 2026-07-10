@@ -1,6 +1,6 @@
 {
   "name": "@exochain/llm-proxy",
-  "version": "0.2.1-beta",
+  "version": "0.2.2",
   "description": "EXOCHAIN LYNK Protocol proxy for receipted LLM and MCP usage",
   "license": "Apache-2.0",
   "repository": {
@@ -20,7 +20,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "AGENTS.md", "examples", "snippets"],
+  "files": ["LICENSE", "dist", "README.md", "AGENTS.md", "examples", "snippets"],
   "scripts": {
     "build": "tsc",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",

@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 
 const requiredFiles = [
+  "LICENSE",
   "README.md",
   "AGENTS.md",
   "dist/index.js",

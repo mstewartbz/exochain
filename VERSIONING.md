@@ -35,7 +35,7 @@ MAJOR.MINOR.PATCH
 The workspace version is set in `Cargo.toml`:
 ```toml
 [workspace.package]
-version = "0.2.1-beta"
+version = "0.2.2"
 ```
 
 ## Release Process
@@ -43,13 +43,12 @@ version = "0.2.1-beta"
 See `.github/workflows/release.yml` for the automated release workflow:
 
 1. The full CI workflow, including the numbered constitutional gates and required aggregator, must pass.
-2. The GitHub `release` environment must approve the run.
+2. Every dispatch traverses the workflow job that references the GitHub `release` environment. Repository settings, not workflow source, determine whether that environment actually requires approval.
 3. Non-dry-run releases must have an existing, verifiable signed `v<version>` tag before artifacts build or publish.
 4. Native artifacts are built for `x86_64-linux-gnu` and `aarch64-linux-gnu`.
-5. CycloneDX SBOM artifacts are generated for the workspace.
-6. GitHub SLSA build attestations are produced for release archives via OIDC/Sigstore.
-7. GitHub Release artifacts are attached to `v<version>`.
-8. Crates are published to crates.io in dependency order unless the run is a dry run.
+5. Non-dry-run releases generate CycloneDX workspace SBOMs and GitHub SLSA build attestations via OIDC/Sigstore.
+6. Non-dry-run releases publish crates in dependency order and publish the versioned npm packages after their dry-pack gates pass.
+7. Non-dry-run release artifacts and SBOMs are attached to the existing signed `v<version>` tag in a published GitHub Release.
 
 ### Release Signing Key Setup
 
@@ -86,16 +85,18 @@ Create and verify the signed release tag only after the key is configured:
 
 ```bash
 git fetch origin main --tags
-git tag -s v0.2.1-beta "$(git rev-parse origin/main)" -m "EXOCHAIN v0.2.1-beta"
-git tag -v v0.2.1-beta
-git push origin v0.2.1-beta
+git tag -s v0.2.2 "$(git rev-parse origin/main)" -m "EXOCHAIN v0.2.2"
+git tag -v v0.2.2
+git push origin v0.2.2
 ```
 
 ### Dry Run
 
-Trigger via the GitHub Actions UI with `dry_run=true`. This runs CI and builds
-reviewable artifacts, but skips the signed-tag requirement and crates.io publish.
-The GitHub Release is created as a draft for review.
+Trigger via the GitHub Actions UI with `dry_run=true`. A dry run still traverses
+the `release` environment, runs the full CI workflow, builds both native release
+archives from the dispatched commit, and builds and dry-packs the WASM and LYNK
+npm packages. It skips the signed-tag requirement, SBOM/SLSA job, crates.io and
+npm publication, and does not create a GitHub Release.
 
 ```bash
 # Quick local validation (does not replicate the full release pipeline):
@@ -105,11 +106,26 @@ cargo test --workspace
 
 ### DualControl Configuration
 
-The `release` environment in GitHub repository settings **must** have at least two
-required reviewers from distinct council panels before any live release. Dry-run
-executions do not require this restriction. To configure:
+The workflow source proves only that its approval job references the `release`
+environment. It does not prove the repository's current environment protection
+rules. Inspect those rules before every live release:
 
-> Repository Settings → Environments → release → Required reviewers → add ≥ 2 reviewers
+```bash
+gh api repos/exochain/exochain/environments/release \
+  --jq '{protection_rules, can_admins_bypass}'
+```
+
+GitHub environment required reviewers are a one-of gate: Only one configured
+required reviewer needs to approve a waiting job. Listing two council reviewers
+therefore does not establish two-person approval. `prevent_self_review` and
+`can_admins_bypass=false` strengthen a single approval but still do not create a
+second independent approval.
+
+A live release must not be dispatched until two distinct approvals are enforced
+by independently protected workflow gates or an equivalent custom deployment
+protection rule, with current repository-setting evidence retained alongside the
+release record. Dry runs still traverse the `release` environment but perform no
+publication or GitHub Release write.
 
 ## Rollback (Yank) Procedure
 
@@ -121,10 +137,10 @@ resolution requiring retraction.
 
 ```bash
 # Yank a specific crate version (repeats for each affected crate)
-cargo yank --version 0.2.1-beta exo-core
+cargo yank --version 0.2.2 exochain-core
 
 # Restore a yank if issued in error
-cargo yank --version 0.2.1-beta exo-core --undo
+cargo yank --version 0.2.2 exochain-core --undo
 ```
 
 Yanks must be logged as a governance action: open an issue with label

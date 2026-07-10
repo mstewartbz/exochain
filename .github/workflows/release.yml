@@ -16,7 +16,8 @@
 
 # EXOCHAIN Release Workflow
 #
-# Requires all CI gates to pass plus release-environment approval.
+# Routes through the release environment after all CI gates pass.
+# Repository settings determine whether approval is required.
 # Non-dry-run releases must be anchored to an existing signed tag.
 # Produces deterministic release artifacts with CycloneDX SBOMs and SLSA attestations.
 
@@ -74,18 +75,18 @@ jobs:
           printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
 
   # -----------------------------------------------------------------------
-  # Manual approval gate
+  # Release environment gate
   # -----------------------------------------------------------------------
   approve:
-    name: "Maintainer Approval"
+    name: "Release Environment Gate"
     runs-on: ubuntu-latest
     needs: [ci, validate-release-inputs]
     environment: release
     steps:
-      - name: Approval confirmed
+      - name: Environment gate passed
         env:
           RELEASE_VERSION: ${{ needs.validate-release-inputs.outputs.version }}
-        run: printf 'Release %s approved by maintainer.\n' "$RELEASE_VERSION"
+        run: printf 'Release %s passed the configured release environment gate.\n' "$RELEASE_VERSION"
 
   # -----------------------------------------------------------------------
   # Signed tag gate for real releases
@@ -643,7 +644,7 @@ jobs:
           if (manifest.version !== process.env.RELEASE_VERSION) {
             throw new Error(`LYNK package version ${manifest.version} must match release ${process.env.RELEASE_VERSION}`);
           }
-          const requiredFiles = ['dist', 'README.md', 'AGENTS.md', 'examples', 'snippets'];
+          const requiredFiles = ['LICENSE', 'dist', 'README.md', 'AGENTS.md', 'examples', 'snippets'];
           for (const required of requiredFiles) {
             if (!manifest.files.includes(required)) {
               throw new Error(`LYNK package files list must include ${required}`);

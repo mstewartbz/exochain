@@ -53,6 +53,20 @@ deploy_sha_count=$(grep -cF 'SAFE_DEPLOY_SHA: ${{ steps.safe-ref.outputs.sha }}'
 [[ "$deploy_sha_count" -eq 4 ]] \
   || fail "both services in staging and production must deploy the resolved safe SHA"
 
+if grep -nE '^      RAILWAY_TOKEN:' "$workflow"; then
+  fail "Railway tokens must not be exposed at deploy-job scope"
+fi
+
+step_token_count=$(grep -cE '^          RAILWAY_TOKEN:' "$workflow")
+[[ "$step_token_count" -eq 9 ]] \
+  || fail "each environment must scope its Railway token to two deploy steps and one smoke step"
+
+for secret_name in DEVELOPMENT STAGING PRODUCTION; do
+  secret_count=$(grep -cF "RAILWAY_TOKEN: \${{ secrets.RAILWAY_${secret_name}_TOKEN }}" "$workflow")
+  [[ "$secret_count" -eq 3 ]] \
+    || fail "RAILWAY_${secret_name}_TOKEN must appear only on its three secret-bearing steps"
+done
+
 grep -F 'tools/test_livesafe_railway_deploy_ref_guard.sh' "$ci_workflow" >/dev/null \
   || fail "CI must run the LiveSafe Railway deploy ref guard"
 

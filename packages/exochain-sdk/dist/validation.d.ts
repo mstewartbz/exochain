@@ -1,4 +1,4 @@
-import type { Did, EconomyObjectResponse, EconomyRecordAnchor, Hash256, HealthResponse, QuorumResult } from './types.js';
+import type { Did, EconomyObjectResponse, EconomyRecordAnchor, ExochainDiscoveryResponse, Hash256, HealthResponse, QuorumResult } from './types.js';
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 export type JsonObject = {
@@ -7,6 +7,7 @@ export type JsonObject = {
 export declare function assertJsonObject(value: unknown, context: string): JsonObject;
 export declare function validateHash256(value: unknown, context: string): Hash256;
 export declare function validateHealthResponse(value: unknown): HealthResponse;
+export declare function validateExochainDiscoveryResponse(value: unknown): ExochainDiscoveryResponse;
 export declare function validateDidResponse(value: unknown, context: string): {
     did: Did;
 };
