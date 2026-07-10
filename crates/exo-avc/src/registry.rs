@@ -1017,8 +1017,32 @@ mod tests {
             issue_avc,
             test_support::{baseline_draft, did, h256, ts},
         },
+        receipt::{
+            AVC_RECEIPT_SIGNING_DOMAIN, AvcReceiptExternalTimestampProof,
+            AvcReceiptTimestampProvenance,
+        },
         revocation::{AvcRevocation, AvcRevocationReason, revoke_avc},
+        validation::{AvcActionDescriptor, AvcDecision, AvcReasonCode},
     };
+
+    #[derive(serde::Serialize)]
+    struct PreLynkExtendedReceiptSigningPayload<'a> {
+        domain: &'static str,
+        schema_version: u16,
+        credential_id: &'a Hash256,
+        action_id: Option<&'a Hash256>,
+        action_commitment_hash: Option<&'a Hash256>,
+        action_descriptor: Option<&'a AvcActionDescriptor>,
+        action_descriptor_hash: Option<&'a Hash256>,
+        previous_receipt_hash: Option<&'a Hash256>,
+        timestamp_provenance: Option<&'a AvcReceiptTimestampProvenance>,
+        external_timestamp_proof: Option<&'a AvcReceiptExternalTimestampProof>,
+        validator_did: &'a Did,
+        decision: &'a AvcDecision,
+        reason_codes: &'a [AvcReasonCode],
+        created_at: &'a Timestamp,
+        validation_hash: &'a Hash256,
+    }
 
     fn keypair(seed: u8) -> KeyPair {
         KeyPair::from_secret_bytes([seed; 32]).unwrap()
@@ -1133,6 +1157,53 @@ mod tests {
         let payload = receipt.signing_payload().unwrap();
         receipt.receipt_id = Hash256::digest(&payload);
         receipt.signature = validator_keypair.sign(&payload);
+        receipt
+    }
+
+    fn pre_lynk_extended_receipt_for_credential(
+        credential_id: Hash256,
+        validator_keypair: &KeyPair,
+    ) -> AvcTrustReceipt {
+        let mut receipt = AvcTrustReceipt {
+            schema_version: crate::credential::AVC_SCHEMA_VERSION,
+            receipt_id: Hash256::ZERO,
+            credential_id,
+            action_id: Some(h256(0x21)),
+            action_commitment_hash: Some(h256(0x22)),
+            action_descriptor: None,
+            action_descriptor_hash: None,
+            llm_usage_evidence_hash: None,
+            previous_receipt_hash: None,
+            timestamp_provenance: Some(AvcReceiptTimestampProvenance::LocalHybridLogicalClock),
+            external_timestamp_proof: None,
+            validator_did: did("validator"),
+            decision: AvcDecision::Allow,
+            reason_codes: vec![AvcReasonCode::Valid],
+            created_at: ts(0x24),
+            validation_hash: h256(0x25),
+            signature: Signature::empty(),
+        };
+        let payload = PreLynkExtendedReceiptSigningPayload {
+            domain: AVC_RECEIPT_SIGNING_DOMAIN,
+            schema_version: receipt.schema_version,
+            credential_id: &receipt.credential_id,
+            action_id: receipt.action_id.as_ref(),
+            action_commitment_hash: receipt.action_commitment_hash.as_ref(),
+            action_descriptor: receipt.action_descriptor.as_ref(),
+            action_descriptor_hash: receipt.action_descriptor_hash.as_ref(),
+            previous_receipt_hash: receipt.previous_receipt_hash.as_ref(),
+            timestamp_provenance: receipt.timestamp_provenance.as_ref(),
+            external_timestamp_proof: receipt.external_timestamp_proof.as_ref(),
+            validator_did: &receipt.validator_did,
+            decision: &receipt.decision,
+            reason_codes: &receipt.reason_codes,
+            created_at: &receipt.created_at,
+            validation_hash: &receipt.validation_hash,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&payload, &mut bytes).unwrap();
+        receipt.receipt_id = Hash256::digest(&bytes);
+        receipt.signature = validator_keypair.sign(&bytes);
         receipt
     }
 
@@ -1834,6 +1905,33 @@ mod tests {
         assert_eq!(restored.receipt_count(), 1);
         assert_eq!(restored.receipt_chain_head(), None);
         assert_eq!(restored.get_receipt(&receipt.receipt_id).unwrap(), receipt);
+    }
+
+    #[test]
+    fn durable_state_accepts_pre_lynk_extended_receipt_and_preserves_id_and_signature() {
+        let mut durable_source = fresh_registry();
+        let (credential_id, issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut durable_source);
+        let validator_keypair = keypair(0x33);
+        let receipt = pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair);
+        let mut state = durable_source.durable_state();
+        state.receipts.insert(receipt.receipt_id, receipt.clone());
+        state.receipt_chain_head = Some(receipt.receipt_id);
+
+        let restored = InMemoryAvcRegistry::from_durable_state(state.clone()).unwrap();
+        assert_eq!(
+            restored.get_receipt(&receipt.receipt_id),
+            Some(receipt.clone())
+        );
+        assert_eq!(restored.receipt_chain_head(), Some(receipt.receipt_id));
+
+        let mut live = fresh_registry();
+        live.put_public_key(did("issuer"), issuer_keypair.public);
+        live.put_receipt_validator_public_key(did("validator"), validator_keypair.public);
+        live.apply_durable_state(state).unwrap();
+
+        assert_eq!(live.get_receipt(&receipt.receipt_id), Some(receipt.clone()));
+        assert_eq!(live.receipt_chain_head(), Some(receipt.receipt_id));
     }
 
     #[test]
