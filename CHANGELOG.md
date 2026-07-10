@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes matching each stored content ID. Current receipt generation, public ID
   verification, live writes, LYNK receipts, and unsupported schemas remain on
   the canonical fail-closed path.
+- Hardened LiveSafe Railway promotions to validate a full lowercase commit SHA
+  reachable from `origin/main` before target checkout, bind deployment audit
+  messages to that validated SHA, and expose each Railway token only to its
+  deploy and smoke steps.
 - Updated LiveSafe's direct and transitive dependency set to resolve all npm
   audit findings, including current Axios, React Router, Vite, PostCSS,
   Nodemailer, UUID, and Multer lines. The canonical LiveSafe quality gate now
