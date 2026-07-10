@@ -276,7 +276,7 @@ impl InMemoryAvcRegistry {
                     ),
                 });
             }
-            registry.validate_receipt_structural(&receipt)?;
+            registry.validate_persisted_receipt_structural(&receipt)?;
             registry.receipts.insert(stored_id, receipt);
         }
         registry.validate_durable_receipt_evidence(state.receipt_chain_head)?;
@@ -374,7 +374,7 @@ impl InMemoryAvcRegistry {
     /// startup trust anchors are intentionally restored out-of-band.
     pub fn validate_loaded_receipts(&self) -> Result<(), AvcError> {
         for receipt in self.receipts.values() {
-            self.validate_receipt(receipt)?;
+            self.validate_persisted_receipt(receipt)?;
         }
         Ok(())
     }
@@ -648,6 +648,23 @@ impl InMemoryAvcRegistry {
     }
 
     fn validate_receipt_structural(&self, receipt: &AvcTrustReceipt) -> Result<Vec<u8>, AvcError> {
+        let payload = receipt.signing_payload()?;
+        if Hash256::digest(&payload) != receipt.receipt_id {
+            return Err(AvcError::InvalidInput {
+                reason: format!(
+                    "receipt {} for credential {} has an invalid content id",
+                    receipt.receipt_id, receipt.credential_id
+                ),
+            });
+        }
+        self.validate_receipt_references(receipt)?;
+        Ok(payload)
+    }
+
+    fn validate_persisted_receipt_structural(
+        &self,
+        receipt: &AvcTrustReceipt,
+    ) -> Result<Vec<u8>, AvcError> {
         let payload = receipt
             .signing_payload_matching_receipt_id()?
             .ok_or_else(|| AvcError::InvalidInput {
@@ -656,6 +673,11 @@ impl InMemoryAvcRegistry {
                     receipt.receipt_id, receipt.credential_id
                 ),
             })?;
+        self.validate_receipt_references(receipt)?;
+        Ok(payload)
+    }
+
+    fn validate_receipt_references(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
         if receipt.signature.is_empty() {
             return Err(AvcError::InvalidInput {
                 reason: format!("receipt {} has an empty signature", receipt.receipt_id),
@@ -669,11 +691,24 @@ impl InMemoryAvcRegistry {
                 ),
             });
         }
-        Ok(payload)
+        Ok(())
     }
 
     fn validate_receipt(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
         let payload = self.validate_receipt_structural(receipt)?;
+        self.validate_receipt_signature(receipt, &payload)
+    }
+
+    fn validate_persisted_receipt(&self, receipt: &AvcTrustReceipt) -> Result<(), AvcError> {
+        let payload = self.validate_persisted_receipt_structural(receipt)?;
+        self.validate_receipt_signature(receipt, &payload)
+    }
+
+    fn validate_receipt_signature(
+        &self,
+        receipt: &AvcTrustReceipt,
+        payload: &[u8],
+    ) -> Result<(), AvcError> {
         let public_key = self
             .receipt_validator_public_keys
             .get(&receipt.validator_did)
@@ -683,7 +718,7 @@ impl InMemoryAvcRegistry {
                     receipt.validator_did
                 ),
             })?;
-        if !crypto::verify(&payload, &receipt.signature, public_key) {
+        if !crypto::verify(payload, &receipt.signature, public_key) {
             return Err(AvcError::InvalidInput {
                 reason: format!("receipt signature for {} is invalid", receipt.receipt_id),
             });
@@ -1625,8 +1660,7 @@ mod tests {
     #[test]
     fn put_receipt_rejects_new_pre_lynk_extended_receipt_without_mutating_registry() {
         let mut reg = fresh_registry();
-        let (credential_id, _issuer_keypair) =
-            register_sample_credential_and_issuer_key(&mut reg);
+        let (credential_id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
         let validator_keypair = put_validator_key(&mut reg);
         let receipt =
             pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x21);
