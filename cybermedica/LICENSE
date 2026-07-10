@@ -1,0 +1,25 @@
+CyberMedica — Proprietary and Confidential
+Copyright (c) 2026 Exochain Foundation. All rights reserved.
+
+This directory (the "cybermedica/" subtree of the exochain/exochain repository)
+and all of its contents constitute proprietary and confidential software owned
+by the Exochain Foundation. It is a commercial product and is NOT licensed under the Apache License, Version 2.0
+that governs the remainder of this repository.
+
+No license, express or implied, is granted to any person or entity to use,
+copy, modify, merge, publish, distribute, sublicense, create derivative works
+from, or sell any portion of this subtree, except under a separate written
+agreement signed by an authorized representative of the Exochain Foundation.
+
+The presence of this source in a public repository is for transparency and
+reference only and does not grant any right to use it. All rights not expressly
+granted are reserved.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For licensing inquiries: legal@exochain.org
