@@ -266,7 +266,9 @@ jobs:
             echo "::error::LICENSE file does not appear to be Apache-2.0"
             exit 1
           fi
-          echo "✓ License consistent: Apache-2.0"
+          echo "✓ EXOCHAIN workspace license consistent: Apache-2.0"
+      - name: Proprietary subtree license boundaries
+        run: bash tools/test_proprietary_license_boundaries.sh
       - name: No GAP stubs remaining in code (A-102)
         # Fails if any `STUB` marker referencing a GAP-NNN identifier
         # remains in a code file. Prevents a GAP from being marked closed
