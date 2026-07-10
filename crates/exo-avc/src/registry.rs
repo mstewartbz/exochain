@@ -1623,6 +1623,26 @@ mod tests {
     }
 
     #[test]
+    fn put_receipt_rejects_new_pre_lynk_extended_receipt_without_mutating_registry() {
+        let mut reg = fresh_registry();
+        let (credential_id, _issuer_keypair) =
+            register_sample_credential_and_issuer_key(&mut reg);
+        let validator_keypair = put_validator_key(&mut reg);
+        let receipt =
+            pre_lynk_extended_receipt_for_credential(credential_id, &validator_keypair, None, 0x21);
+        let before = reg.durable_state();
+
+        let err = reg.put_receipt(receipt.clone()).unwrap_err();
+
+        assert!(
+            matches!(err, AvcError::InvalidInput { reason } if reason.contains("invalid content id")),
+            "live writes must require the current canonical receipt payload"
+        );
+        assert_eq!(reg.durable_state(), before);
+        assert!(reg.get_receipt(&receipt.receipt_id).is_none());
+    }
+
+    #[test]
     fn put_receipt_accepts_scoped_validator_key_without_generic_issuer_trust() {
         let mut reg = fresh_registry();
         let (id, _issuer_keypair) = register_sample_credential_and_issuer_key(&mut reg);
