@@ -77,6 +77,9 @@ pub enum ForumError {
     #[error("human gate required: AI cannot satisfy this approval")]
     HumanGateRequired,
 
+    #[error("two-person gate required: {reason}")]
+    TwoPersonGateRequired { reason: String },
+
     #[error("AI delegation ceiling exceeded: {reason}")]
     AiCeilingExceeded { reason: String },
 
@@ -174,6 +177,9 @@ mod tests {
                 reason: "nil id".into(),
             },
             ForumError::HumanGateRequired,
+            ForumError::TwoPersonGateRequired {
+                reason: "missing Max attestation".into(),
+            },
             ForumError::AiCeilingExceeded {
                 reason: "Strategic".into(),
             },

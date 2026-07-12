@@ -34,9 +34,9 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Metric | Value | Source |
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
-| Rust source files | 469 | `git ls-files 'crates/**/*.rs'` |
-| Rust LOC | 385381 | `git ls-files 'crates/**/*.rs'` + `wc -l` |
-| Workspace tests | 6,236 listed | `cargo test --workspace -- --list` |
+| Rust source files | 471 | `git ls-files 'crates/**/*.rs'` |
+| Rust LOC | 386120 | `git ls-files 'crates/**/*.rs'` + `wc -l` |
+| Workspace tests | 6,248 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Latest published release | `v0.2.1-beta` (GitHub Release published 2026-07-08; `exochain-core` on crates.io and `@exochain/llm-proxy` on npm resolve the same version) | `gh release list`; `cargo search exochain-core`; `npm view @exochain/llm-proxy version` |
 | License | Apache-2.0 for EXOCHAIN core; proprietary terms for `livesafe/` and `cybermedica/` | `Cargo.toml`; `livesafe/LICENSE`; `cybermedica/LICENSE` |
@@ -44,7 +44,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **6,236 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **6,248 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
@@ -124,10 +124,10 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 385381 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 386120 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
          production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
-         SNARK/STARK/ZKML skeletons, 6,236 listed workspace tests
+         SNARK/STARK/ZKML skeletons, 6,248 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript

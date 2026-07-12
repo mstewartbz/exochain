@@ -28,7 +28,9 @@ publish.workspace = true
 default = []
 anthropic = []
 openai = []
+xai = []
 google = []
+providers = ["anthropic", "openai", "xai"]
 
 [dependencies]
 serde.workspace = true
@@ -40,6 +42,7 @@ decision-forum = { package = "exochain-decision-forum", path = "../decision-foru
 
 [dev-dependencies]
 proptest.workspace = true
+uuid = { workspace = true }
 
 [lib]
 name = "exo_consensus"

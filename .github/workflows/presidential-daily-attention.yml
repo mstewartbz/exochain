@@ -1,0 +1,86 @@
+# Copyright 2026 Exochain Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: Presidential Daily Attention
+
+on:
+  schedule:
+    # Reminder cadence — does not send Slack until dogfood gate + secrets exist
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "validate | chaos-drill-reminder"
+        required: true
+        default: validate
+        type: choice
+        options:
+          - validate
+          - chaos-drill-reminder
+
+permissions:
+  contents: read
+
+jobs:
+  c2-graph-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Mission graph node page guard
+        run: bash tools/test_mission_c2_graph.sh
+
+  attention-fail-closed:
+    runs-on: ubuntu-latest
+    needs: [c2-graph-guard]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Require doctrine artifacts
+        run: |
+          set -euo pipefail
+          for f in \
+            docs/c2/README.md \
+            docs/c2/DAILY-ATTENTION-PROTOCOL.md \
+            docs/c2/CHAIRMAN-ESCALATION.md \
+            docs/c2/TWO-PERSON-GATE.md \
+            docs/c2/CCIR.md \
+            docs/c2/DOGFOOD.md \
+            docs/c2/CHAOS-DRILL.md \
+            docs/c2/CROSSCHECK-RECEIPTS.md \
+            docs/c2/AI-IRB-COHORT.md \
+            docs/c2/RUNTIME-TOPOLOGY.md \
+            docs/c2/schemas/daily-brief.schema.json \
+            docs/c2/schemas/attention-item.schema.json
+          do
+            test -f "$f" || { echo "missing $f"; exit 1; }
+          done
+      - name: Fail closed when push automation secrets absent
+        env:
+          MODE: ${{ github.event.inputs.mode || 'validate' }}
+          SLACK_WEBHOOK_URL: ${{ secrets.PRESIDENTIAL_SLACK_WEBHOOK_URL }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.PRESIDENTIAL_TWILIO_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "mode=$MODE"
+          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
+            echo "Presidential Slack webhook unset — push automation remains disabled (fail closed)."
+          else
+            echo "Slack webhook secret present — still requires docs/c2/DOGFOOD.md calibration before live push."
+          fi
+          if [[ "$MODE" == "chaos-drill-reminder" ]]; then
+            echo "Reminder: execute docs/c2/CHAOS-DRILL.md and record drill receipt."
+          fi
+          # Never emit live Slack/SMS from CI without an explicit future promote job.
+          echo "OK: presidential daily attention workflow stayed advisory/fail-closed."
