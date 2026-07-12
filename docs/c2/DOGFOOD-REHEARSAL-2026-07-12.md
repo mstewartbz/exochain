@@ -42,9 +42,14 @@ SPDX-License-Identifier: Apache-2.0
 | Routine task completion | No | Keep |
 | Railway health fail after promote | Yes (CCIR) | Keep |
 
+## Live item prepared for dual gate
+
+Binding worksheet: [DOGFOOD-LIVE-ITEM-PUSH-ENABLEMENT.md](DOGFOOD-LIVE-ITEM-PUSH-ENABLEMENT.md)
+(push-enablement ratification; AI-IRB seats + Bob/Max rows still blank).
+
 ## Blockers to full dogfood close
 
-- Human Bob+Max attestation on one **live** Strategic/Constitutional GAP/ratification item (not only the automated bridge fixture).
+- Human Bob+Max attestation on the live item above (not only the automated bridge fixture).
 - GitHub Actions secrets not writable by this cloud-agent token (`HTTP 403` on `gh secret set/list`).
 - Railway variables require Bob’s Railway OAuth/session (device login) — see [SECRETS-ACTIVATION.md](SECRETS-ACTIVATION.md).
 
