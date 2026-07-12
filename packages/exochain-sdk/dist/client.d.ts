@@ -4,7 +4,7 @@
  * authority) wraps the shared {@link HttpTransport}.
  */
 import { HttpTransport } from './transport/http.js';
-import type { AutomatedSettlementRequest, EconomyObjectResponse, HealthResponse, Did, Hash256, MissionSettlementRequest, QuorumResult } from './types.js';
+import type { AutomatedSettlementRequest, EconomyObjectResponse, ExochainDiscoveryResponse, HealthResponse, Did, Hash256, MissionSettlementRequest, QuorumResult } from './types.js';
 import { type JsonObject } from './validation.js';
 /** Options for constructing an {@link ExochainClient}. */
 export interface ExochainClientOptions {
@@ -95,5 +95,7 @@ export declare class ExochainClient {
     constructor(opts: ExochainClientOptions);
     /** Gateway health probe. */
     health(): Promise<HealthResponse>;
+    /** Public EXOCHAIN discovery document from `/.well-known/exochain.json`. */
+    discover(): Promise<ExochainDiscoveryResponse>;
 }
 //# sourceMappingURL=client.d.ts.map

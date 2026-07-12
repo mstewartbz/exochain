@@ -91,9 +91,22 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: Free coverage runner disk
+        run: |
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup
+          df -h /
       - name: Install cargo-tarpaulin
         run: bash tools/ci_cargo_retry.sh cargo install cargo-tarpaulin --version 0.35.4 --locked
       - name: Run coverage
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         # exochain-wasm: excluded — wasm bindings are exercised by the JS
         # bridge tests (Gate 21), not tarpaulin.
         # exochain-proofs: excluded — the entire crate is gated behind
@@ -253,7 +266,9 @@ jobs:
             echo "::error::LICENSE file does not appear to be Apache-2.0"
             exit 1
           fi
-          echo "✓ License consistent: Apache-2.0"
+          echo "✓ EXOCHAIN workspace license consistent: Apache-2.0"
+      - name: Proprietary subtree license boundaries
+        run: bash tools/test_proprietary_license_boundaries.sh
       - name: No GAP stubs remaining in code (A-102)
         # Fails if any `STUB` marker referencing a GAP-NNN identifier
         # remains in a code file. Prevents a GAP from being marked closed
@@ -313,6 +328,8 @@ jobs:
         run: bash tools/test_no_orphan_rust_modules.sh
       - name: Railway entrypoint ingress contract
         run: bash tools/test_railway_entrypoint_args.sh
+      - name: LiveSafe Railway deploy ref guard
+        run: bash tools/test_livesafe_railway_deploy_ref_guard.sh
       - name: Deployment readiness probes
         run: bash tools/test_deployment_readiness_probes.sh
       - name: Public route verifier portability

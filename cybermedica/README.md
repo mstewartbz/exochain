@@ -702,3 +702,9 @@ AI orientation assistant coverage: DOC-005 and DOC-006 orientation answers must 
 ## Trust Boundary
 
 CyberMedica stores mutable operational state. Exochain receipts, DAG/provenance, root bundles, gateway/node decisions, and Decision Forum outcomes remain external trust evidence until a verified adapter path is selected and tested. The baseline contracts do not mint, simulate, cache, or override consent, authority, quorum, provenance, root authority, or Decision Forum outcomes, and production activation evidence is denied if it is locally simulated, cached, overridden, or carries protected content or secret material.
+
+## License
+
+CyberMedica is proprietary and confidential software. No use rights are granted
+without a separate written agreement with the Exochain Foundation. See
+[LICENSE](LICENSE).

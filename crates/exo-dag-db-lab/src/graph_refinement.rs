@@ -3314,18 +3314,14 @@ fn sha256_bytes_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
     use crate::graph_explorer::{
-        GraphExplorerCluster, GraphExplorerClusterType, GraphExplorerDrilldownMode,
-        GraphExplorerDrilldownState, GraphExplorerEdgeDirection, GraphExplorerExportResultStatus,
-        GraphExplorerGeneratedFrom, GraphExplorerGenerationMode, GraphExplorerLimits,
-        GraphExplorerPermissions, GraphExplorerSourceMode, GraphExplorerSummaries,
-        RawContentUnavailableReason,
+        GRAPH_EXPLORER_TARGET_LOCK, GraphExplorerCluster, GraphExplorerClusterType,
+        GraphExplorerDrilldownMode, GraphExplorerDrilldownState, GraphExplorerEdgeDirection,
+        GraphExplorerExportResultStatus, GraphExplorerGeneratedFrom, GraphExplorerGenerationMode,
+        GraphExplorerLimits, GraphExplorerPermissions, GraphExplorerSourceMode,
+        GraphExplorerSummaries, RawContentUnavailableReason,
     };
-
-    static TARGET_ARTIFACT_LOCK: Mutex<()> = Mutex::new(());
 
     fn node(id: &str, kind: MemoryNodeKind, style: MemoryGraphStyle) -> GraphExplorerNode {
         GraphExplorerNode {
@@ -5314,7 +5310,7 @@ mod tests {
 
     #[test]
     fn graph_refinement_dataset_artifact_branch_vectors() {
-        let _guard = TARGET_ARTIFACT_LOCK
+        let _guard = GRAPH_EXPLORER_TARGET_LOCK
             .lock()
             .expect("target artifact lock should not be poisoned");
         let root = reset_refinement_test_dir("dataset-artifact-branches-root");
@@ -5603,7 +5599,7 @@ mod tests {
 
     #[test]
     fn graph_refinement_generation_branches_cover_filesystem_inputs() {
-        let _guard = TARGET_ARTIFACT_LOCK
+        let _guard = GRAPH_EXPLORER_TARGET_LOCK
             .lock()
             .expect("target artifact lock should not be poisoned");
         let root = repo_root_path();
@@ -5693,7 +5689,7 @@ mod tests {
 
     #[test]
     fn graph_refinement_artifacts_generate_under_target() {
-        let _guard = TARGET_ARTIFACT_LOCK
+        let _guard = GRAPH_EXPLORER_TARGET_LOCK
             .lock()
             .expect("target artifact lock should not be poisoned");
         let root = repo_root_path();

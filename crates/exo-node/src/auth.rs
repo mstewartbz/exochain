@@ -24,7 +24,9 @@
 //! reads that disclose receipts, provenance, economy records, or credentials
 //! also require the bearer token. Exact 0dentity signed-write routes pass
 //! through so their handlers can verify DID-scoped session tokens and request
-//! signatures.
+//! signatures. The LiveSafe public adapter-output authorization route may also
+//! accept its own scoped bearer token; that token is bound to the exact public
+//! output route and is never accepted for other mutating or sensitive routes.
 
 use std::{
     io::{ErrorKind, Write},
@@ -40,11 +42,38 @@ use axum::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+pub const LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE: &str =
+    "/api/v1/avc/livesafe/public-adapter-output-authorization";
+
 /// Shared bearer token state for the auth middleware.
 #[derive(Clone)]
 pub struct BearerAuth {
     /// The expected bearer token (hex-encoded 256-bit random value).
     pub token: Arc<Zeroizing<String>>,
+}
+
+/// Optional route-scoped bearer tokens that never inherit admin authority.
+#[derive(Clone, Default)]
+pub struct ScopedBearerAuth {
+    livesafe_public_adapter_output_authorization: Option<Arc<Zeroizing<String>>>,
+}
+
+impl ScopedBearerAuth {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn livesafe_public_adapter_output_authorization(token: Zeroizing<String>) -> Self {
+        Self {
+            livesafe_public_adapter_output_authorization: Some(Arc::new(token)),
+        }
+    }
+
+    pub fn livesafe_public_adapter_output_authorization_configured(&self) -> bool {
+        self.livesafe_public_adapter_output_authorization
+            .as_ref()
+            .is_some()
+    }
 }
 
 /// Generate a cryptographically random admin token (hex-encoded 32 bytes).
@@ -121,22 +150,43 @@ pub fn write_admin_token_file(path: &Path, token: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn verify_bearer_header(headers: &HeaderMap, auth: &BearerAuth) -> Result<(), StatusCode> {
+fn bearer_header_value(headers: &HeaderMap) -> Result<&str, StatusCode> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
     match header {
-        Some(value) if value.starts_with("Bearer ") => {
-            let provided = &value["Bearer ".len()..];
-            if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
-                Ok(())
-            } else {
-                Err(StatusCode::FORBIDDEN)
-            }
-        }
+        Some(value) if value.starts_with("Bearer ") => Ok(&value["Bearer ".len()..]),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn verify_bearer_header(headers: &HeaderMap, auth: &BearerAuth) -> Result<(), StatusCode> {
+    let provided = bearer_header_value(headers)?;
+    if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+fn verify_admin_or_livesafe_public_output_bearer(
+    headers: &HeaderMap,
+    auth: &BearerAuth,
+    scoped_auth: &ScopedBearerAuth,
+) -> Result<(), StatusCode> {
+    let provided = bearer_header_value(headers)?;
+    if constant_time_eq(provided.as_bytes(), auth.token.as_bytes()) {
+        return Ok(());
+    }
+
+    if let Some(token) = &scoped_auth.livesafe_public_adapter_output_authorization {
+        if constant_time_eq(provided.as_bytes(), token.as_bytes()) {
+            return Ok(());
+        }
+    }
+
+    Err(StatusCode::FORBIDDEN)
 }
 
 /// axum middleware: require bearer token on every request.
@@ -190,14 +240,25 @@ fn is_zerodentity_local_signed_write(method: &axum::http::Method, path: &str) ->
 /// Route-shape check for the AVC subject-signed receipt-emission write
 /// (VCG-006a / #737).
 ///
-/// This only recognizes the exact `POST /api/v1/avc/receipts/emit` route by
+/// This only recognizes exact AVC subject-signed receipt emission routes by
 /// method and path — mirroring `is_zerodentity_local_signed_write`'s
 /// route-shape style. It makes no claim about authority; it just identifies
-/// which route may be eligible for the carve-out in
+/// which routes may be eligible for the carve-out in
 /// `require_bearer_on_writes`, which independently confirms a genuine
 /// (non-empty) subject signature is present before admitting the request.
 fn is_avc_receipts_emit_route(method: &axum::http::Method, path: &str) -> bool {
-    method == axum::http::Method::POST && path == "/api/v1/avc/receipts/emit"
+    method == axum::http::Method::POST
+        && matches!(
+            path,
+            "/api/v1/avc/receipts/emit" | "/api/v1/avc/llm-usage/receipts/emit"
+        )
+}
+
+fn is_livesafe_public_adapter_output_authorization_route(
+    method: &axum::http::Method,
+    path: &str,
+) -> bool {
+    method == axum::http::Method::POST && path == LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE
 }
 
 /// Maximum body size read while peeking for a subject signature on the AVC
@@ -206,27 +267,28 @@ fn is_avc_receipts_emit_route(method: &axum::http::Method, path: &str) -> bool {
 /// the downstream router would have rejected anyway.
 const AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Determine whether a `POST /api/v1/avc/receipts/emit` request carries a
+/// Determine whether an AVC subject-signed receipt-emission request carries a
 /// genuine (non-empty) subject signature, without weakening the real
 /// authority check.
 ///
 /// This buffers the request body (bounded to
 /// `AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES`) and parses it as
-/// `crate::avc::EmitReceiptRequest`, reusing the exact same type and
-/// `Signature::is_empty()` predicate the handler and `verify_subject_action_signature`
-/// use — no duplicated signature-shape logic. It reconstructs an equivalent
-/// request from the buffered bytes so the downstream handler still receives
-/// the original body.
+/// the route-specific request DTO, reusing the exact same type and
+/// `Signature::is_empty()` predicate the handlers and
+/// `verify_subject_action_signature` use — no duplicated signature-shape
+/// logic. It reconstructs an equivalent request from the buffered bytes so
+/// the downstream handler still receives the original body.
 ///
 /// This function never performs cryptographic signature verification —
 /// that remains exclusively `verify_subject_action_signature` inside
-/// `handle_emit_receipt`. A body that merely contains a non-empty signature
+/// the AVC emit handlers. A body that merely contains a non-empty signature
 /// field is let through to the handler, which is the actual authority gate
 /// and can still reject an invalid signature. A body with no signature
 /// (empty, missing, or unparseable) is never let through — this carve-out
 /// must never open an unauthenticated hole.
 async fn avc_emit_receipt_carve_out(request: Request<Body>) -> (Request<Body>, bool) {
     let (parts, body) = request.into_parts();
+    let path = parts.uri.path().to_owned();
     let bytes = match axum::body::to_bytes(body, AVC_EMIT_RECEIPT_CARVE_OUT_MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -238,8 +300,17 @@ async fn avc_emit_receipt_carve_out(request: Request<Body>) -> (Request<Body>, b
         }
     };
 
-    let has_subject_signature = serde_json::from_slice::<crate::avc::EmitReceiptRequest>(&bytes)
-        .is_ok_and(|parsed| !parsed.subject_signature.is_empty());
+    let has_subject_signature = match path.as_str() {
+        "/api/v1/avc/receipts/emit" => {
+            serde_json::from_slice::<crate::avc::EmitReceiptRequest>(&bytes)
+                .is_ok_and(|parsed| !parsed.subject_signature.is_empty())
+        }
+        "/api/v1/avc/llm-usage/receipts/emit" => {
+            serde_json::from_slice::<crate::avc::LlmUsageReceiptEmitRequest>(&bytes)
+                .is_ok_and(|parsed| !parsed.subject_signature.is_empty())
+        }
+        _ => false,
+    };
 
     let rebuilt = Request::from_parts(parts, Body::from(bytes));
     (rebuilt, has_subject_signature)
@@ -263,11 +334,26 @@ pub async fn require_bearer_on_writes(
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    require_bearer_on_writes_with_scoped_bearers(auth, ScopedBearerAuth::none(), request, next)
+        .await
+}
+
+pub async fn require_bearer_on_writes_with_scoped_bearers(
+    auth: BearerAuth,
+    scoped_auth: ScopedBearerAuth,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let is_public_read = (method == axum::http::Method::GET || method == axum::http::Method::HEAD)
         && !is_sensitive_read_path(&path);
     if is_public_read || is_zerodentity_local_signed_write(&method, &path) {
+        return Ok(next.run(request).await);
+    }
+
+    if is_livesafe_public_adapter_output_authorization_route(&method, &path) {
+        verify_admin_or_livesafe_public_output_bearer(request.headers(), &auth, &scoped_auth)?;
         return Ok(next.run(request).await);
     }
 
@@ -374,6 +460,29 @@ mod tests {
             }))
     }
 
+    fn livesafe_public_output_scoped_bearer_test_app(scoped_bearer: Option<&str>) -> Router {
+        let auth = test_auth();
+        let scoped_auth = scoped_bearer
+            .map(|token| {
+                ScopedBearerAuth::livesafe_public_adapter_output_authorization(Zeroizing::new(
+                    token.to_owned(),
+                ))
+            })
+            .unwrap_or_else(ScopedBearerAuth::none);
+        Router::new()
+            .route(
+                LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_ROUTE,
+                post(|| async { "public-output" }),
+            )
+            .route("/api/v1/avc/issue", post(|| async { "issue" }))
+            .route("/api/v1/receipts/:hash", get(|| async { "receipt" }))
+            .layer(middleware::from_fn(move |req, next| {
+                let a = auth.clone();
+                let scoped = scoped_auth.clone();
+                require_bearer_on_writes_with_scoped_bearers(a, scoped, req, next)
+            }))
+    }
+
     fn strict_test_app() -> Router {
         let auth = test_auth();
         Router::new()
@@ -415,6 +524,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn livesafe_public_output_scoped_bearer_accepts_exact_public_output_route_when_configured()
+     {
+        let app = livesafe_public_output_scoped_bearer_test_app(Some(
+            "livesafe-public-output-scoped-token",
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+                    .header(
+                        "Authorization",
+                        "Bearer livesafe-public-output-scoped-token",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn livesafe_public_output_scoped_bearer_does_not_authorize_avc_issue() {
+        let app = livesafe_public_output_scoped_bearer_test_app(Some(
+            "livesafe-public-output-scoped-token",
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/avc/issue")
+                    .header(
+                        "Authorization",
+                        "Bearer livesafe-public-output-scoped-token",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn livesafe_public_output_scoped_bearer_does_not_authorize_sensitive_receipt_read() {
+        let app = livesafe_public_output_scoped_bearer_test_app(Some(
+            "livesafe-public-output-scoped-token",
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/receipts/0000000000000000000000000000000000000000000000000000000000000000")
+                    .header(
+                        "Authorization",
+                        "Bearer livesafe-public-output-scoped-token",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn livesafe_public_output_scoped_bearer_rejects_wrong_token_on_exact_route() {
+        let app = livesafe_public_output_scoped_bearer_test_app(Some(
+            "livesafe-public-output-scoped-token",
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+                    .header("Authorization", "Bearer wrong-livesafe-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn livesafe_public_output_scoped_bearer_absent_preserves_admin_only_behavior() {
+        let admin_app = livesafe_public_output_scoped_bearer_test_app(None);
+        let admin_resp = admin_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+                    .header("Authorization", "Bearer test-token-abc123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_resp.status(), StatusCode::OK);
+
+        let scoped_app = livesafe_public_output_scoped_bearer_test_app(None);
+        let scoped_resp = scoped_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/avc/livesafe/public-adapter-output-authorization")
+                    .header(
+                        "Authorization",
+                        "Bearer livesafe-public-output-scoped-token",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped_resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -929,6 +1158,42 @@ mod tests {
         assert!(
             !auth_production.contains("displayed once"),
             "auth documentation must not normalize logging bearer-token material"
+        );
+    }
+
+    #[test]
+    fn livesafe_public_output_scoped_bearer_startup_guard_wires_env_without_logging_material() {
+        let main_source = include_str!("main.rs");
+        let main_production = main_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("tests marker present");
+        let auth_source = include_str!("auth.rs");
+        let auth_production = auth_source
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("tests marker present");
+
+        assert!(
+            main_production
+                .contains("EXOCHAIN_LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_BEARER"),
+            "startup must read the scoped LiveSafe public-output bearer env var"
+        );
+        assert!(
+            auth_production.contains("/api/v1/avc/livesafe/public-adapter-output-authorization"),
+            "auth middleware must bind the scoped bearer to the exact public-output route"
+        );
+        assert!(
+            !main_production.contains("livesafe-public-output-scoped-token"),
+            "startup source must not embed scoped bearer material"
+        );
+        assert!(
+            !auth_production.contains("livesafe-public-output-scoped-token"),
+            "auth source must not embed scoped bearer material"
+        );
+        assert!(
+            !main_production.contains("scoped_token.chars().take"),
+            "startup logs must not include even partial scoped bearer token material"
         );
     }
 }

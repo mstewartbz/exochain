@@ -319,4 +319,4 @@ npm run lint   # tsc --noEmit
 
 ## License
 
-Apache-2.0 — see `LICENSE` at the repository root.
+Apache-2.0; see the bundled `LICENSE` file.

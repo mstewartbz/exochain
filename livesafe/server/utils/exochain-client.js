@@ -369,6 +369,23 @@ function coreTimestampToIso(value) {
   return null;
 }
 
+function isCoreHlcTimestamp(value) {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+
+  const physicalMs = Number.isInteger(value.physical_ms)
+    ? value.physical_ms
+    : value.physicalMs;
+
+  return (
+    Number.isInteger(physicalMs) &&
+    physicalMs >= 0 &&
+    Number.isInteger(value.logical) &&
+    value.logical >= 0
+  );
+}
+
 const RAW_SENSITIVE_FIELD_KEYS = new Set([
   'authorization_header',
   'bearer_token',
@@ -486,6 +503,14 @@ function normalizeHash256(value) {
   return `sha256:${bytesToLowerHex(value)}`;
 }
 
+function normalizePublicAuthorizationIdentifier(value) {
+  if (isNonEmptyString(value)) {
+    return value;
+  }
+
+  return normalizeHash256(value);
+}
+
 function normalizePublicAuthorizationSignature(signature) {
   if (!isObjectRecord(signature)) {
     return null;
@@ -579,15 +604,17 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
   const actionCommitmentHash = normalizeHash256(proof.action_commitment_hash);
   const idempotencyKeyHash = normalizeHash256(proof.idempotency_key_hash);
   const proofHash = normalizeHash256(proof.proof_hash);
+  const credentialId = normalizePublicAuthorizationIdentifier(proof.credential_id);
+  const receiptId = normalizePublicAuthorizationIdentifier(proof.receipt_id);
   const signature = normalizePublicAuthorizationSignature(proof.signature);
   if (
     !evidenceHash ||
     !actionCommitmentHash ||
     !idempotencyKeyHash ||
     !proofHash ||
+    !credentialId ||
+    !receiptId ||
     !signature ||
-    !isNonEmptyString(proof.credential_id) ||
-    !isNonEmptyString(proof.receipt_id) ||
     !isNonEmptyString(proof.signer_did)
   ) {
     return { state: 'rejected', value: null };
@@ -599,9 +626,12 @@ function adaptCorePublicAdapterOutputAuthorizationEnvelope(
       schema: PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SCHEMA,
       subject: proof.subject,
       audience: proof.audience,
+      ...(isCoreHlcTimestamp(proof.issued_at)
+        ? { timestamp_basis: 'exochain_hlc' }
+        : {}),
       claims: [...ALLOWED_PUBLIC_ADAPTER_OUTPUT_CLAIMS],
       evidence_hash: evidenceHash,
-      receipt_id: proof.receipt_id,
+      receipt_id: receiptId,
       proof_id: proofHash,
       proof_ref: `exochain-avc:${proofHash}`,
       generated_at: generatedAt,

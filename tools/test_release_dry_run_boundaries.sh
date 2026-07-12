@@ -23,7 +23,10 @@ fail() {
 }
 
 workflow=".github/workflows/release.yml"
+versioning="VERSIONING.md"
 [[ -f "$workflow" ]] || fail "$workflow is missing"
+[[ -f "$versioning" ]] || fail "$versioning is missing"
+versioning_text="$(tr '\n' ' ' < "$versioning")"
 
 job_block() {
   local job="$1"
@@ -66,6 +69,22 @@ grep -F 'if: ${{ !inputs.dry_run }}' <<<"$wasm_publish_block" >/dev/null \
 
 if grep -F 'draft: ${{ inputs.dry_run }}' "$workflow" >/dev/null; then
   fail "dry-run releases must not create draft GitHub Releases"
+fi
+
+if grep -F 'approved by maintainer' "$workflow" >/dev/null; then
+  fail "workflow source must not claim a maintainer approval supplied by repository settings"
+fi
+grep -Fi 'repository settings determine whether approval is required' "$workflow" >/dev/null \
+  || fail "release workflow must distinguish its environment gate from configured approval"
+
+grep -F 'does not create a GitHub Release' <<<"$versioning_text" >/dev/null \
+  || fail "VERSIONING.md must state that dry runs do not create GitHub Releases"
+grep -F 'still traverses the `release` environment' <<<"$versioning_text" >/dev/null \
+  || fail "VERSIONING.md must state that dry runs traverse the release environment"
+grep -F 'Only one configured required reviewer needs to approve' <<<"$versioning_text" >/dev/null \
+  || fail "VERSIONING.md must document GitHub's one-of required-reviewer semantics"
+if grep -F 'The GitHub Release is created as a draft for review.' <<<"$versioning_text" >/dev/null; then
+  fail "VERSIONING.md must not claim that a dry run creates a draft release"
 fi
 
 printf 'release dry-run boundary test passed\n'

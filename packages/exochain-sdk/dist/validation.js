@@ -1,3 +1,18 @@
+// Copyright 2026 Exochain Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 import { TransportError } from './errors.js';
 import { validateDid } from './identity/did.js';
 const HASH256_RE = /^[0-9a-f]{64}$/;
@@ -96,6 +111,18 @@ function requireJsonValue(record, key, context) {
     validateJsonValue(value, `${context}.${key}`, new WeakSet());
     return value;
 }
+function requireStringArray(record, key, context) {
+    const value = record[key];
+    if (!Array.isArray(value)) {
+        throw validationError(`${context}.${key} must be an array`);
+    }
+    for (let index = 0; index < value.length; index++) {
+        if (typeof value[index] !== 'string') {
+            throw validationError(`${context}.${key}[${index}] must be a string`);
+        }
+    }
+    return value;
+}
 function requireEconomyObjectKind(record, key, context) {
     const value = requireString(record, key, context);
     if (!ECONOMY_OBJECT_KINDS.includes(value)) {
@@ -122,6 +149,37 @@ export function validateHealthResponse(value) {
         status: requireString(record, 'status', 'health response'),
         version: requireString(record, 'version', 'health response'),
         uptime: requireFiniteNumber(record, 'uptime', 'health response'),
+    };
+}
+export function validateExochainDiscoveryResponse(value) {
+    const record = requireRecord(value, 'EXOCHAIN discovery response');
+    const routes = requireRecord(record.routes, 'EXOCHAIN discovery response.routes');
+    const avc = requireRecord(routes.avc, 'EXOCHAIN discovery response.routes.avc');
+    const sdk = requireRecord(record.sdk, 'EXOCHAIN discovery response.sdk');
+    const mcp = requireRecord(record.mcp, 'EXOCHAIN discovery response.mcp');
+    return {
+        base_url: requireString(record, 'base_url', 'EXOCHAIN discovery response'),
+        routes: {
+            health: requireString(routes, 'health', 'EXOCHAIN discovery response.routes'),
+            ready: requireString(routes, 'ready', 'EXOCHAIN discovery response.routes'),
+            avc: {
+                issue: requireString(avc, 'issue', 'EXOCHAIN discovery response.routes.avc'),
+                validate: requireString(avc, 'validate', 'EXOCHAIN discovery response.routes.avc'),
+                receipts_emit: requireString(avc, 'receipts_emit', 'EXOCHAIN discovery response.routes.avc'),
+                receipts_get: requireString(avc, 'receipts_get', 'EXOCHAIN discovery response.routes.avc'),
+                protocol: requireString(avc, 'protocol', 'EXOCHAIN discovery response.routes.avc'),
+            },
+        },
+        sdk: {
+            rust: requireString(sdk, 'rust', 'EXOCHAIN discovery response.sdk'),
+            typescript: requireString(sdk, 'typescript', 'EXOCHAIN discovery response.sdk'),
+            python: requireString(sdk, 'python', 'EXOCHAIN discovery response.sdk'),
+        },
+        mcp: {
+            public_transport: requireBoolean(mcp, 'public_transport', 'EXOCHAIN discovery response.mcp'),
+            transports: requireStringArray(mcp, 'transports', 'EXOCHAIN discovery response.mcp'),
+            capabilities: requireStringArray(mcp, 'capabilities', 'EXOCHAIN discovery response.mcp'),
+        },
     };
 }
 export function validateDidResponse(value, context) {

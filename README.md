@@ -34,21 +34,21 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 | Metric | Value | Source |
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
-| Rust source files | 462 | `find crates -name '*.rs'` |
-| Rust LOC | 377871 | `wc -l` |
-| Workspace tests | 6,110 listed | `cargo test --workspace -- --list` |
+| Rust source files | 469 | `git ls-files 'crates/**/*.rs'` |
+| Rust LOC | 385381 | `git ls-files 'crates/**/*.rs'` + `wc -l` |
+| Workspace tests | 6,236 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
-| Published releases | No GitHub Release or crates.io publication verified; pre-release git tags exist (`v0.1.0-alpha`, `v0.1.0-beta`) | `git tag -l`; release workflow state |
-| License | Apache-2.0 | `Cargo.toml` |
-| Live node health | Verified for https://exochain-production.up.railway.app/health on 2026-05-09 | `tools/verify_live_node_claim.sh` |
+| Latest published release | `v0.2.1-beta` (GitHub Release published 2026-07-08; `exochain-core` on crates.io and `@exochain/llm-proxy` on npm resolve the same version) | `gh release list`; `cargo search exochain-core`; `npm view @exochain/llm-proxy version` |
+| License | Apache-2.0 for EXOCHAIN core; proprietary terms for `livesafe/` and `cybermedica/` | `Cargo.toml`; `livesafe/LICENSE`; `cybermedica/LICENSE` |
+| Live node health | Not inferred from repository state; verify each target at deploy or release time | `tools/verify_live_node_claim.sh` |
 
 ### What is verified today
 
-- **6,102 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **6,236 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
-- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined and enforced
+- **23 numbered CI quality gates** plus the required "All Constitutional Gates" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings
 - **Traceability matrix** maps 119 requirements — see `governance/traceability_matrix.md`
 - **Threat model** covers 17 threats tracked: 17 implemented, 0 partial, 0 planned — see `governance/threat_matrix.md`
 - **Constitutional invariants** are enforced in the tested gatekeeper and decision-forum adjudication paths
@@ -58,7 +58,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 ### What is supported by design but not yet production-hardened
 
 - **Scoped 90% coverage threshold** — configured in CI via cargo-tarpaulin and `tarpaulin.toml`; the default coverage gate explicitly excludes runtime adapters, WASM bridge bindings, and proof modules
-- **exo-gateway binary** — operational HTTP server with 28 endpoints (REST, GraphQL, health probes); production hardening ongoing
+- **exo-gateway binary** — operational HTTP server with 30 endpoints (REST and health probes) plus GraphQL; production hardening ongoing
 - **GraphQL API** — types and schema definitions exist in `exo-api`; async runtime integration pending
 - **exo-dag benchmark** — disabled; needs rewrite against current API
 
@@ -68,7 +68,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### Roadmap / Planned
 
-- First versioned release (see `.github/workflows/release.yml` for the dry-run workflow)
+- Next governed release through the signed-tag, approval, publication, SBOM, and attestation workflow in `.github/workflows/release.yml`
 - CycloneDX SBOM generation and SLSA supply-chain attestation are configured in CI/release workflows; published release artifacts are not claimed until a GitHub Release exists
 - Agent passport API and trust receipt endpoints on exo-node
 - National AI Policy Framework compliance extensions
@@ -94,6 +94,17 @@ pricing or settlement state, and the economy layer never gates trust on
 payment availability. Future governance amendments can switch nonzero
 pricing on by policy without modifying AVC validation.
 
+The repository also contains the **EXOCHAIN LYNK Protocol** package at
+[`packages/exochain-llm-proxy`](packages/exochain-llm-proxy/). LYNK is a
+core runtime adapter for receipted LLM and MCP usage: OpenAI Responses, OpenAI
+Chat Completions, and MCP `tools/call` are wrapped in signed AVC evidence and
+`POST /api/v1/avc/llm-usage/receipts/emit`. Production callers fail closed:
+provider output is withheld when receipt emission returns `receipt_pending`.
+Package release readiness depends on the coverage-first Task 8 gates recorded in
+[`docs/superpowers/lynk-coverage-evidence-2026-07-08.md`](docs/superpowers/lynk-coverage-evidence-2026-07-08.md)
+and planned in
+[`docs/superpowers/plans/2026-07-08-llm-usage-receipt-extensions.md`](docs/superpowers/plans/2026-07-08-llm-usage-receipt-extensions.md).
+
 HonorGood and Apex Velocity Catalyst Mission Economics now live in
 `exo-economy` as core provenance and settlement primitives: Missions,
 Contribution Receipts, Legacy Receipts, Value Contribution Nodes,
@@ -113,10 +124,10 @@ Catalyst is named explicitly.
 ## Architecture
 
 ```
-Layer 1: CGR Kernel         (Rust, 31 crates, 377565 tracked LOC under crates/)
+Layer 1: CGR Kernel         (Rust, 31 crates, 385381 tracked LOC under crates/)
          Constitutional governance runtime — deterministic, no floats,
          production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
-         SNARK/STARK/ZKML skeletons, 6,102 listed workspace tests
+         SNARK/STARK/ZKML skeletons, 6,236 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
@@ -201,7 +212,7 @@ and production observability are tracked in the DAG DB runtime activation runboo
 [`docs/dagdb/runtime-activation/rollback-canary-observability.md`](docs/dagdb/runtime-activation/rollback-canary-observability.md).
 These runtime docs do not claim billing savings or thesis acceptance.
 
-### Core Crates (22)
+### Core Crates (23)
 
 | Crate | Description |
 |-------|-------------|
@@ -210,7 +221,7 @@ These runtime docs do not claim billing savings or thesis acceptance.
 | `exo-gatekeeper` | TEE/Enclave interfaces, attestation verification, kernel invariants, holon, MCP |
 | `exo-dag` | Directed Acyclic Graph engine, BFT consensus adapter, checkpointing, HLC |
 | `exo-dag-db-*` | Split DAG DB and graph-governed agent memory runtime crates |
-| `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (28 endpoints) |
+| `exo-gateway` | External gateway: REST, GraphQL, auth, health probes (30 enumerated REST endpoints plus GraphQL) |
 | `exo-identity` | Decentralized Identity (DID), key management, Shamir secret sharing, vault |
 | `exo-proofs` | SNARK, STARK, ZKML proof-system skeletons (unaudited, pedagogical — not production cryptography), verifier infrastructure |
 | `exo-authority` | Authority delegation, role-based access, attestation chains |
@@ -233,7 +244,7 @@ These runtime docs do not claim billing savings or thesis acceptance.
 
 * **`governance/`** — Council resolutions, sub-agent charters, traceability matrices, quality gates
 * **`docs/`** — Architecture, guides, council panel reports, proofs, reference documentation
-* **`.github/workflows/`** — CI pipeline (22 numbered quality gates plus required aggregator), release workflow, ExoForge triage
+* **`.github/workflows/`** — CI pipeline (23 numbered quality gates plus required aggregator), release workflow, ExoForge triage
 
 ## Governance & Compliance
 
@@ -243,7 +254,7 @@ This repository is managed under strict **Judicial Build Governance**. All contr
 
 * [Traceability Matrix](governance/traceability_matrix.md) — 119 requirements tracked
 * [Threat Model](governance/threat_matrix.md) — 17 tracked: 17 implemented, 0 partial, 0 planned
-* [Quality Gates](governance/quality_gates.md) — 22 numbered CI gates plus required aggregator
+* [Quality Gates](governance/quality_gates.md) — 23 numbered CI gates plus required aggregator
 * [Sub-Agent Charters](governance/sub_agents.md) — 11 agent charters documented
 * [Council Resolutions](governance/resolutions/INDEX.md) — CR-001 DRAFT
 * [Tier-One Readiness Audit](docs/audit/TIER-ONE-READINESS-AUDIT.md) — capability model, gap analysis, exit checklist
@@ -343,8 +354,10 @@ Float arithmetic is denied workspace-wide via `#[deny(clippy::float_arithmetic)]
 
 ## License
 
-Apache-2.0 for all of this repository **except** the [`livesafe/`](livesafe/) subtree, which
-is proprietary and commercial (all rights reserved) — see [livesafe/LICENSE](livesafe/LICENSE).
+Apache-2.0 applies to EXOCHAIN core. The [`livesafe/`](livesafe/) and
+[`cybermedica/`](cybermedica/) subtrees are proprietary and commercial (all
+rights reserved); see [livesafe/LICENSE](livesafe/LICENSE) and
+[cybermedica/LICENSE](cybermedica/LICENSE).
 See also [LICENSE](LICENSE) and [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
 
 ---

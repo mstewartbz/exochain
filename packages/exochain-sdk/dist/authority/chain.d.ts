@@ -1,10 +1,3 @@
-/**
- * Authority chain builder and validator.
- *
- * An authority chain is an ordered list of delegation links where each
- * `grantee` is the `grantor` of the next link. The chain terminates at a
- * specific actor. Mirrors the Rust SDK's `AuthorityChainBuilder` API.
- */
 import type { Did } from '../types.js';
 /** A single delegation link. */
 export interface ChainLink {

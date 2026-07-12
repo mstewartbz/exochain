@@ -106,6 +106,8 @@
 pub mod credential;
 pub mod delegation;
 pub mod error;
+pub mod livesafe_public_output_ceremony;
+pub mod llm_usage_receipt;
 pub mod public_output_authorization;
 pub mod receipt;
 pub mod registry;
@@ -122,6 +124,20 @@ pub use credential::{
 };
 pub use delegation::{delegate_avc, parent_id_of};
 pub use error::AvcError;
+pub use livesafe_public_output_ceremony::{
+    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_CREDENTIAL_SUBJECT_DID,
+    LIVESAFE_PUBLIC_OUTPUT_CREDENTIAL_CEREMONY_DOMAIN,
+    LivesafePublicOutputAuthorizationRequestMaterial,
+    LivesafePublicOutputCredentialCeremonyEvidence, LivesafePublicOutputCredentialCeremonyInput,
+    LivesafePublicOutputCredentialCeremonyOutput, LivesafePublicOutputCredentialIssueRequest,
+    issue_livesafe_public_output_credential_ceremony, parse_livesafe_public_output_evidence_sha256,
+};
+pub use llm_usage_receipt::{
+    AVC_LLM_USAGE_EVIDENCE_DOMAIN, AVC_LLM_USAGE_EVIDENCE_SIGNATURE_DOMAIN,
+    EXOCHAIN_LYNK_PROTOCOL_NAME, EncryptedPayloadRef, LlmUsageCustodyMode, LlmUsageEvidence,
+    LlmUsageEvidenceEnvelope, ProviderUsageMetrics, llm_usage_evidence_hash,
+    llm_usage_evidence_signature_payload, validate_llm_usage_evidence,
+};
 pub use public_output_authorization::{
     LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
     LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
@@ -153,10 +169,11 @@ pub use revocation::{
 };
 pub use validation::{
     AVC_ACTION_COMMITMENT_DOMAIN, AVC_ACTION_DESCRIPTOR_DOMAIN, AVC_ACTION_SIGNING_DOMAIN,
-    AVC_HUMAN_APPROVAL_SIGNING_DOMAIN, AvcActionDescriptor, AvcActionRequest, AvcDecision,
-    AvcHumanApproval, AvcReasonCode, AvcValidationRequest, AvcValidationResult,
-    avc_action_commitment_hash, avc_action_descriptor_hash, avc_action_signature_payload,
-    human_approval_signature_payload, validate_avc,
+    AVC_HUMAN_APPROVAL_SIGNING_DOMAIN, AVC_LLM_USAGE_ACTION_NAME, AvcActionDescriptor,
+    AvcActionRequest, AvcDecision, AvcHumanApproval, AvcReasonCode, AvcValidationRequest,
+    AvcValidationResult, avc_action_commitment_hash, avc_action_descriptor_hash,
+    avc_action_signature_payload, avc_llm_usage_action_request, human_approval_signature_payload,
+    validate_avc,
 };
 
 /// All AVC signing domains as a sorted slice — used by hygiene tests
@@ -167,6 +184,9 @@ pub const AVC_SIGNING_DOMAINS: &[&str] = &[
     AVC_ACTION_SIGNING_DOMAIN,
     AVC_CREDENTIAL_SIGNING_DOMAIN,
     AVC_HUMAN_APPROVAL_SIGNING_DOMAIN,
+    AVC_LLM_USAGE_EVIDENCE_DOMAIN,
+    AVC_LLM_USAGE_EVIDENCE_SIGNATURE_DOMAIN,
+    LIVESAFE_PUBLIC_OUTPUT_CREDENTIAL_CEREMONY_DOMAIN,
     LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN,
     AVC_RECEIPT_EVIDENCE_SUBJECT_DOMAIN,
     AVC_RECEIPT_EXTERNAL_TIMESTAMP_DOMAIN,
@@ -200,7 +220,9 @@ mod hygiene_tests {
             include_str!("credential.rs"),
             include_str!("delegation.rs"),
             include_str!("error.rs"),
+            include_str!("livesafe_public_output_ceremony.rs"),
             include_str!("lib.rs"),
+            include_str!("llm_usage_receipt.rs"),
             include_str!("public_output_authorization.rs"),
             include_str!("receipt.rs"),
             include_str!("registry.rs"),
@@ -230,7 +252,9 @@ mod hygiene_tests {
             include_str!("credential.rs"),
             include_str!("delegation.rs"),
             include_str!("error.rs"),
+            include_str!("livesafe_public_output_ceremony.rs"),
             include_str!("lib.rs"),
+            include_str!("llm_usage_receipt.rs"),
             include_str!("public_output_authorization.rs"),
             include_str!("receipt.rs"),
             include_str!("registry.rs"),
@@ -294,7 +318,9 @@ mod public_output_authorization_tests {
             delegated_intent: DelegatedIntent {
                 intent_id: h256(0xA1),
                 purpose: "Authorize narrow LiveSafe public adapter output".into(),
-                allowed_objectives: vec!["publish-redacted-trust-status".into()],
+                allowed_objectives: vec![
+                    LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_DOMAIN.into(),
+                ],
                 prohibited_objectives: vec![],
                 autonomy_level: AutonomyLevel::ExecuteWithinBounds,
                 delegation_allowed: false,
@@ -320,12 +346,33 @@ mod public_output_authorization_tests {
         }
     }
 
+    fn bind_ceremony_intent(draft: &mut AvcDraft, evidence_hash: Hash256) {
+        let expires_at = draft
+            .expires_at
+            .expect("LiveSafe public-output test credential expiry");
+        draft.delegated_intent.intent_id =
+            crate::livesafe_public_output_ceremony::livesafe_public_output_credential_ceremony_intent_id(
+                &crate::livesafe_public_output_ceremony::LivesafePublicOutputCredentialCeremonyIntentInput {
+                    issuer_did: &draft.issuer_did,
+                    credential_subject_did: &draft.subject_did,
+                    public_subject: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_SUBJECT,
+                    public_audience: LIVESAFE_PUBLIC_ADAPTER_OUTPUT_AUTHORIZATION_AUDIENCE,
+                    allowed_claim_names: &draft.delegated_intent.allowed_objectives,
+                    evidence_hash: &evidence_hash,
+                    not_before: &draft.created_at,
+                    expires_at: &expires_at,
+                },
+            )
+            .expect("LiveSafe public-output test ceremony intent id");
+    }
+
     fn issue_credential(mut draft: AvcDraft) -> AutonomousVolitionCredential {
         let issuer = issuer_keypair();
         if draft.issuer_did != did("did:exo:livesafe-issuer") {
             draft.issuer_did = did("did:exo:livesafe-issuer");
             draft.principal_did = did("did:exo:livesafe-issuer");
         }
+        bind_ceremony_intent(&mut draft, h256(0xE1));
         issue_avc(draft, |bytes| issuer.sign(bytes)).expect("valid LiveSafe AVC")
     }
 
@@ -573,7 +620,11 @@ mod public_output_authorization_tests {
             },
             {
                 let mut altered = livesafe_draft();
-                altered.delegated_intent.intent_id = h256(0xA2);
+                altered.created_at = ts(1_000_001);
+                altered.constraints.allowed_time_window = Some(TimeWindow {
+                    not_before: ts(1_000_001),
+                    not_after: ts(2_000_000),
+                });
                 draft_for(issue_credential(altered))
             },
             {

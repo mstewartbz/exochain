@@ -1,10 +1,3 @@
-/**
- * Hashing primitives.
- *
- * BLAKE3 is used where the SDK must match Rust fabric derivations, including
- * local DID derivation. SHA-256 remains available for client-side proposal
- * IDs, decision IDs, and compatibility with existing TypeScript SDK records.
- */
 import type { Hash256 } from '../types.js';
 /** Compute SHA-256 over `data` and return the raw 32-byte digest. */
 export declare function sha256(data: Uint8Array): Promise<Uint8Array>;

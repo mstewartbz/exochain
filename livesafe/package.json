@@ -7,13 +7,15 @@
     "dev": "concurrently \"cd server && npm run dev\" \"cd client && npm run dev\" \"cd responder && npm run dev\"",
     "install:all": "npm install && cd server && npm install && cd ../client && npm install && cd ../responder && npm install",
     "build": "cd client && npm run build && cd ../responder && npm run build",
+    "audit:deps": "npm audit --package-lock-only --audit-level=low && npm --prefix client audit --package-lock-only --audit-level=low && npm --prefix responder audit --package-lock-only --audit-level=low && npm --prefix server audit --package-lock-only --audit-level=low",
     "context:lint": "node scripts/validate-context.mjs",
     "rust:fmt": "cargo fmt --all -- --check",
     "rust:clippy": "cargo clippy --all-targets -- -D warnings",
     "rust:test": "cargo test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "quality": "npm run context:lint && npm run typecheck && npm test && npm run rust:fmt && npm run rust:clippy && npm run rust:test"
+    "evidence:public-output-hash": "node scripts/exochain-public-output-evidence-hash.mjs",
+    "quality": "npm run audit:deps && npm run context:lint && npm run typecheck && npm test && npm run rust:fmt && npm run rust:clippy && npm run rust:test"
   },
   "engines": {
     "node": ">=22.0.0",
@@ -28,5 +30,6 @@
     "playwright": "^1.60.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7"
-  }
+  },
+  "license": "UNLICENSED"
 }

@@ -1,3 +1,18 @@
+// Copyright 2026 Exochain Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 /**
  * HTTP transport for the `exo-gateway` REST API.
  *
@@ -20,7 +35,7 @@ export class HttpTransport {
         this.#baseUrl = baseUrl.replace(/\/+$/, '');
         if (opts?.apiKey !== undefined)
             this.#apiKey = opts.apiKey;
-        this.#timeout = opts?.timeout ?? 30_000;
+        this.#timeout = opts?.timeout ?? 30000;
         const f = opts?.fetch ?? globalThis.fetch;
         if (typeof f !== 'function') {
             throw new TransportError('fetch is not available in this environment');

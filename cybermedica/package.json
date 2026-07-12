@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "UNLICENSED",
   "description": "CyberMedica adjacent-surface QMS service contracts, deterministic fixtures, and fail-closed Exochain trust-boundary adapters.",
   "files": [
     "CyberMedica_QMS_PRD_Master.docx",

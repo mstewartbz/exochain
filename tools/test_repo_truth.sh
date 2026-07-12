@@ -114,9 +114,24 @@ check_package_license() {
     || fail "$package_file license must match workspace license $workspace_license, got $package_license"
 }
 
+check_package_license_artifact() {
+  local package_dir="$1"
+  local package_file="$package_dir/package.json"
+  local package_license_file="$package_dir/LICENSE"
+
+  [ -f "$package_license_file" ] || fail "$package_license_file is missing from the npm package source"
+  cmp -s LICENSE "$package_license_file" \
+    || fail "$package_license_file must exactly match the repository Apache-2.0 LICENSE"
+  jq -e '.files | index("LICENSE") != null' "$package_file" >/dev/null \
+    || fail "$package_file must explicitly include LICENSE in the npm package"
+}
+
 check_package_license packages/exochain-sdk/package.json
+check_package_license packages/exochain-llm-proxy/package.json
 check_package_license packages/exochain-wasm/wasm/package.json
 check_package_license demo/packages/exochain-wasm/package.json
+check_package_license_artifact packages/exochain-sdk
+check_package_license_artifact packages/exochain-llm-proxy
 
 grep -F 'cargo clippy --workspace --all-targets -- -D warnings' .github/workflows/ci.yml >/dev/null \
   || fail "CI clippy gate must cover all workspace targets"
@@ -133,24 +148,13 @@ test_mode=$(jq -r '.tests.mode' "$json_file")
 [ "$test_mode" = "skipped" ] || fail "--skip-tests should report tests.mode=skipped, got $test_mode"
 
 # ============================================================================
-# README VERACITY GATE — TEMPORARILY DISABLED 2026-07-04 (Bob's directive).
+# README VERACITY GATE
 #
-# The exact-number README assertions below (crate / file / LOC / test / gate /
-# traceability / threat counts) force EVERY concurrent PR to touch the same
-# README repo-truth lines and collide on merge — a recurring merge tax on
-# parallel lanes. Disabled to remove that tax while multiple lanes are in
-# flight.
-#
-# RE-ENABLE at the 2026-07-05 truing-up: set README_VERACITY_GATE=on (or flip
-# the default below), regenerate the numbers with `bash tools/repo_truth.sh`,
-# and update README.md to match the true tree.
-#
-# Everything ELSE in this script stays enforced: unresolved merge-conflict
-# markers, license consistency, cargo-metadata crate-count sanity, the
-# JSON-vs-tree file/LOC checks, clippy/deny lint presence, and the static
-# README claim checks (published-releases, coverage scoping, no stale claims).
+# Exact release-facing claims must derive from the current tree. Operators can
+# opt out locally while resolving a merge, but CI and ordinary runs default to
+# enforcing the complete status, architecture, and repository-structure set.
 # ============================================================================
-README_VERACITY_GATE="${README_VERACITY_GATE:-off}"
+README_VERACITY_GATE="${README_VERACITY_GATE:-on}"
 
 if [ "$README_VERACITY_GATE" = "on" ]; then
   grep -F "| Rust crates | $expected_crates |" README.md >/dev/null || fail "README crate count is not repo-truth derived"
@@ -160,6 +164,43 @@ if [ "$README_VERACITY_GATE" = "on" ]; then
   [ "$readme_tests_listed" = "$expected_tests_listed" ] \
     || fail "README workspace test count $readme_tests_listed != listed test count $expected_tests_listed"
   grep -F "| CI quality gates | $expected_gates |" README.md >/dev/null || fail "README CI gate count is not repo-truth derived"
+
+  expected_tests_display=$(python3 -c 'import sys; print(f"{int(sys.argv[1]):,}")' "$expected_tests_listed")
+  grep -F "**$expected_tests_display workspace tests are listed**" README.md >/dev/null \
+    || fail "README verified-today test count is not repo-truth derived"
+  grep -F "(Rust, $expected_crates crates, $expected_rs_loc tracked LOC under crates/)" README.md >/dev/null \
+    || fail "README architecture LOC is not repo-truth derived"
+  grep -F "$expected_tests_display listed workspace tests" README.md >/dev/null \
+    || fail "README architecture test count is not repo-truth derived"
+  grep -F "CI pipeline ($expected_gates numbered quality gates plus required aggregator)" README.md >/dev/null \
+    || fail "README repository-structure gate count is not repo-truth derived"
+  grep -F "**$expected_gates numbered CI quality gates** plus the required \"All Constitutional Gates\" aggregator are defined; workflow runs report their status, while merge enforcement depends on current GitHub ruleset or branch-protection settings" README.md >/dev/null \
+    || fail "README must separate defined CI gates from GitHub merge enforcement"
+  if grep -F "defined and enforced" README.md >/dev/null; then
+    fail "README must not infer GitHub merge enforcement from workflow source"
+  fi
+  grep -F "Quality Gates](governance/quality_gates.md) — $expected_gates numbered CI gates plus required aggregator" README.md >/dev/null \
+    || fail "README governance-link gate count is not repo-truth derived"
+
+  expected_rest_routes=$(
+    sed -n '/fn test_all_routes/,/^[[:space:]]*}/p' crates/exo-gateway/src/rest.rs \
+      | sed -nE 's/.*assert_eq!\(routes\.len\(\), ([0-9]+)\);.*/\1/p'
+  )
+  [ -n "$expected_rest_routes" ] || fail "could not derive REST route inventory count"
+  grep -F "operational HTTP server with $expected_rest_routes endpoints" README.md >/dev/null \
+    || fail "README gateway endpoint count is not route-inventory derived"
+  grep -F "health probes ($expected_rest_routes enumerated REST endpoints plus GraphQL)" README.md >/dev/null \
+    || fail "README core-crate gateway endpoint count is not route-inventory derived"
+
+  core_crate_rows=$(
+    awk '
+      /^### Core Crates/ { in_core = 1; next }
+      in_core && /^### / { print count; exit }
+      in_core && /^\| `/ { count++ }
+    ' README.md
+  )
+  grep -F "### Core Crates ($core_crate_rows)" README.md >/dev/null \
+    || fail "README Core Crates heading does not match its table"
 fi
 
 trace_total=$(jq '.traceability.total' "$json_file")
@@ -184,7 +225,17 @@ if [ "$tag_count" -gt 0 ]; then
   if grep -F "| Published releases | None (pre-release) | \`git tag -l\` |" README.md >/dev/null; then
     fail "README must not cite git tags as evidence for no published releases when tags exist"
   fi
+  latest_release_tag=$(git tag -l 'v*' --sort=-version:refname | head -1)
+  grep -F "| Latest published release | \`$latest_release_tag\`" README.md >/dev/null \
+    || fail "README latest published release does not match the newest version tag"
 fi
+
+if grep -F "No GitHub Release or crates.io publication verified" README.md >/dev/null; then
+  fail "README contains the stale no-publication claim"
+fi
+
+grep -F "| Live node health | Not inferred from repository state; verify each target at deploy or release time |" README.md >/dev/null \
+  || fail "README must keep live node health separate from repository truth"
 
 grep -F "tested gatekeeper and decision-forum adjudication paths" README.md >/dev/null \
   || fail "README must scope constitutional invariant enforcement to tested adjudication paths"
