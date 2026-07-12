@@ -161,12 +161,14 @@ impl PresidentialCohort {
             ModelProvider::XAI => Ok(&self.xai),
             ModelProvider::OpenAI => Ok(&self.openai),
             ModelProvider::Anthropic => Ok(&self.anthropic),
-            ModelProvider::Google => self.planned.get("google").ok_or_else(|| {
-                ConsensusError::ProviderError("google seat unavailable".into())
-            }),
-            ModelProvider::Other(name) => self.planned.get(name).ok_or_else(|| {
-                ConsensusError::ProviderError(format!("{name} seat unavailable"))
-            }),
+            ModelProvider::Google => self
+                .planned
+                .get("google")
+                .ok_or_else(|| ConsensusError::ProviderError("google seat unavailable".into())),
+            ModelProvider::Other(name) => self
+                .planned
+                .get(name)
+                .ok_or_else(|| ConsensusError::ProviderError(format!("{name} seat unavailable"))),
         }
     }
 }

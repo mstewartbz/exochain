@@ -30,16 +30,16 @@ pub mod session;
 pub use commitment::{commit, commit_response, verify_commitment, verify_response_commitment};
 pub use error::{ConsensusError, Result};
 pub use panel::{ModelProvider, ModelRole, Panel, PanelModel};
-pub use providers::{
-    AdvisoryReceipt, PresidentialCohort, ProviderSeat, SeatConfig, bind_advisory_receipt,
-    require_dissent_receipt,
-};
 #[cfg(feature = "anthropic")]
 pub use providers::anthropic_seat;
 #[cfg(feature = "openai")]
 pub use providers::openai_seat;
 #[cfg(feature = "xai")]
 pub use providers::xai_seat;
+pub use providers::{
+    AdvisoryReceipt, PresidentialCohort, ProviderSeat, SeatConfig, bind_advisory_receipt,
+    require_dissent_receipt,
+};
 pub use record::DeliberationResult;
 pub use report::MinorityReport;
 pub use round::{DeliberationRound, DevilAdvocateReview, ModelDeliberationResponse, ModelPosition};

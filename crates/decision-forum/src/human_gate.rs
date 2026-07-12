@@ -229,7 +229,7 @@ pub fn two_person_veto_present(
     policy: &TwoPersonGatePolicy,
 ) -> bool {
     decision.votes.iter().any(|vote| {
-        (&vote.voter_did == &policy.principal_a || &vote.voter_did == &policy.principal_b)
+        (vote.voter_did == policy.principal_a || vote.voter_did == policy.principal_b)
             && matches!(vote.choice, crate::decision_object::VoteChoice::Reject)
             && is_verified_human_vote(vote, verified_human_voters)
     })
@@ -435,8 +435,8 @@ mod tests {
             &mut clock,
         ))
         .expect("bob vote");
-        let only_bob = enforce_two_person_ratification(&d, &verified, &policy)
-            .expect_err("Max required");
+        let only_bob =
+            enforce_two_person_ratification(&d, &verified, &policy).expect_err("Max required");
         assert!(matches!(only_bob, ForumError::TwoPersonGateRequired { .. }));
         assert!(only_bob.to_string().contains("mstewartbz"));
 

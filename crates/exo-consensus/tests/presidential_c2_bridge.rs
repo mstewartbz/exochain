@@ -17,8 +17,12 @@
 //! Presidential Mission C2 bridge: AI-IRB advisories (exo-consensus) must not
 //! satisfy Decision Forum two-person ratification. Deterministic/mock only.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use decision_forum::{
     decision_object::{
@@ -53,7 +57,10 @@ fn neutral_review() -> DevilAdvocateReview {
 }
 
 fn strategic_provider() -> DeterministicResponseProvider {
-    let shared = response("proceed with dual-gate ratification", &["dual-gate-required"]);
+    let shared = response(
+        "proceed with dual-gate ratification",
+        &["dual-gate-required"],
+    );
     DeterministicResponseProvider::new(
         BTreeMap::from([
             ("claude-3-opus".to_string(), shared.clone()),
@@ -105,7 +112,10 @@ fn presidential_airb_advisories_do_not_satisfy_two_person_gate() {
         if !matches!(model.role, ModelRole::Panelist) {
             continue;
         }
-        let resp = response("proceed with dual-gate ratification", &["dual-gate-required"]);
+        let resp = response(
+            "proceed with dual-gate ratification",
+            &["dual-gate-required"],
+        );
         let receipt = bind_advisory_receipt(&model.provider, &model.model_id, "Panelist", &resp)
             .expect("advisory receipt");
         assert!(!receipt.response_hash.is_empty());
