@@ -213,6 +213,36 @@ pub fn require_dissent_receipt(dissent_receipt_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Feature-gated xAI seat constructor (mock/deterministic only).
+#[cfg(feature = "xai")]
+#[must_use]
+pub fn xai_seat(
+    positions: BTreeMap<String, ModelDeliberationResponse>,
+    devil_advocate_reviews: BTreeMap<String, DevilAdvocateReview>,
+) -> ProviderSeat {
+    ProviderSeat::with_mock(ModelProvider::XAI, positions, devil_advocate_reviews)
+}
+
+/// Feature-gated OpenAI seat constructor (mock/deterministic only).
+#[cfg(feature = "openai")]
+#[must_use]
+pub fn openai_seat(
+    positions: BTreeMap<String, ModelDeliberationResponse>,
+    devil_advocate_reviews: BTreeMap<String, DevilAdvocateReview>,
+) -> ProviderSeat {
+    ProviderSeat::with_mock(ModelProvider::OpenAI, positions, devil_advocate_reviews)
+}
+
+/// Feature-gated Anthropic seat constructor (mock/deterministic only).
+#[cfg(feature = "anthropic")]
+#[must_use]
+pub fn anthropic_seat(
+    positions: BTreeMap<String, ModelDeliberationResponse>,
+    devil_advocate_reviews: BTreeMap<String, DevilAdvocateReview>,
+) -> ProviderSeat {
+    ProviderSeat::with_mock(ModelProvider::Anthropic, positions, devil_advocate_reviews)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
