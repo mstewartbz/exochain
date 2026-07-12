@@ -66,6 +66,7 @@ Routine work never reaches the presidential desk.
 | [TWO-PERSON-GATE.md](TWO-PERSON-GATE.md) | Bob + Max dual attestation |
 | [CROSSCHECK-RECEIPTS.md](CROSSCHECK-RECEIPTS.md) | Advisory ↔ receipt binding |
 | [DOGFOOD.md](DOGFOOD.md) | Manual rehearsal before automation |
+| [SECRETS-ACTIVATION.md](SECRETS-ACTIVATION.md) | Operator GitHub/Railway secret names + push gate |
 | [CHAOS-DRILL.md](CHAOS-DRILL.md) | Monthly fail-closed drills |
 | [STEER-PROTOCOL.md](STEER-PROTOCOL.md) | HOW-team steer packs |
 | [PROGRESS.md](PROGRESS.md) | Rollup-by-reference |

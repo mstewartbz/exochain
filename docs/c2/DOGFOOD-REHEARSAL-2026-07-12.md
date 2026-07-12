@@ -45,17 +45,20 @@ SPDX-License-Identifier: Apache-2.0
 ## Blockers to full dogfood close
 
 - Human Bob+Max attestation on one **live** Strategic/Constitutional GAP/ratification item (not only the automated bridge fixture).
-- GitHub Actions secrets not writable by this agent (`HTTP 403`); Railway MCP/CLI unavailable in this environment.
+- GitHub Actions secrets not writable by this cloud-agent token (`HTTP 403` on `gh secret set/list`).
+- Railway variables require Bob’s Railway OAuth/session (device login) — see [SECRETS-ACTIVATION.md](SECRETS-ACTIVATION.md).
 
 ## Push enablement decision
 
 **Do not enable live Slack/SMS push yet.** Remain fail-closed until:
 
 1. PR #791 merged to `main`
-2. Secrets configured (see below)
+2. Secrets configured per [SECRETS-ACTIVATION.md](SECRETS-ACTIVATION.md)
 3. Bob+Max complete one live dual-gate ratify/veto on a real item and update this record to **Complete**
 
 ## Required secrets (names only — values must be set by operators)
+
+Operator runbook: [SECRETS-ACTIVATION.md](SECRETS-ACTIVATION.md).
 
 ### GitHub Actions (`exochain/exochain`)
 
