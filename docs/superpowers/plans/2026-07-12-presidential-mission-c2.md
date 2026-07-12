@@ -22,7 +22,7 @@ SPDX-License-Identifier: Apache-2.0
 **Date:** 2026-07-12  
 **Classification:** Governance / C2 steering plan (docs + future core adapter + adjacent Presidential Desk). Not a constitutional trust claim by itself.
 
-**Overview:** Build a presidential-level C2 loop on Railway (runtime) orchestrated via GitHub (CI/CD, Archon/ExoForge triggers): Mission Graph + Daily Attention Orchestrator (council-routed AI-IRB, receipts, ratify/veto) + real-time Executive Chairman Slack/SMS escalation.
+**Overview:** Build a presidential-level C2 loop on Railway (runtime) orchestrated via GitHub (CI/CD, Archon/ExoForge triggers): Mission Graph + Daily Attention Orchestrator (council-routed AI-IRB, receipts, ratify/veto) + real-time Executive Chairman Slack/SMS escalation. Irreversible actions require dual attestation from Bob (`bob-stewart`) and Max (`mstewartbz`). Dogfood manual IRB slice before automating push.
 
 ## Workstream checklist
 
@@ -38,6 +38,10 @@ SPDX-License-Identifier: Apache-2.0
 | crosscheck-receipt-path | Define crosschecked advisory + receipt binding into attention items (fail closed if missing) | pending |
 | c2-progress-index | Add `PROGRESS.md` rollup-by-reference + `docs/INDEX.md` link | pending |
 | c2-phase2-ui | CommandBase Presidential Desk UI: daily greet, attention queue, push escalation, challenge/inquire, ratify/veto (adjacent intake) | pending |
+| dogfood-manual-slice | Manual AI-IRB + paper brief rehearsal (1–2 weeks) before Railway/Slack automation | pending |
+| ccir-kill-criteria | Define CCIRs and per-node kill criteria; wire into brief filter + blocker triggers | pending |
+| two-person-gate | Constitutional/irreversible ratify-veto requires Bob + Max dual attestation | pending |
+| chaos-drill | Monthly Slack-kill / empty-evidence IRB fail-closed drill | pending |
 
 ## Intent (your WHY for this system)
 
@@ -128,6 +132,64 @@ flowchart TB
 - Heuristic ExoForge/Archon panel simulation is **not** sufficient for presidential-bound items; those require Decision Forum + AI-IRB path (or explicit downgrade with recorded rationale).
 - Assurance theater forbidden (D9): eloquent model names without evidence substrate do not constitute a binding advisory.
 - **Blockers always have an escalation path to Executive Chairman in real time**; push delivery failure is itself a receipted fault (fail loud, retry, then secondary channel)—never silent drop.
+- **Two-person / two-system rule** for constitutional and other irreversible actions (see below): Bob + Max dual attestation; no single-human or agent-only close.
+- **CCIRs only on Slack** — non-CCIR noise stays on the daily brief or auto-route; alert fatigue is a governance failure.
+- **Permanent red-team seat** on every presidential AI-IRB session (devil’s advocate is never optional).
+
+## Two-person / two-system gate (locked principals)
+
+Constitutional-class decisions, irreversible ratify/veto, emergency override ratification, and any action that would mint or revoke trust claims require **dual human attestation** from:
+
+| Principal | GitHub identity | Role in gate |
+|-----------|-----------------|--------------|
+| **Bob Stewart** | `bob-stewart` | Executive Chairman / CTO — mission WHY, presidential attention, first attestation |
+| **Max Stewart** | `mstewartbz` | Co-principal / second system — independent attestation; cannot be the same session or delegated agent acting as Max |
+
+Rules:
+
+- Both attestations must be **separately authenticated** (distinct identity envelopes / signed desk actions), recorded on the decision receipt.
+- Agents, AI-IRB seats, Slack acks, and CommandBase Board personas **cannot** satisfy either half of the gate.
+- Either principal may **veto**; ratification of irreversible items requires **both**.
+- Non-irreversible Operational items may use single-principal ratify when policy tags allow; when in doubt, apply the dual gate.
+- Doctrine artifact: `docs/c2/TWO-PERSON-GATE.md` (identities, decision classes covered, receipt schema, failure modes).
+
+## Dogfood posture (before live automation)
+
+**Not ready** to dogfood as a live Railway/Slack C2 system until Phase 1 doctrine exists and a manual rehearsal calibrates CCIRs.
+
+**Ready to dogfood:** a thin Phase 1 vertical slice:
+
+1. Stand up `docs/c2/` (README, graph YAML, 3–5 live nodes only — e.g. DAG DB activation, VCG-001/004, platform/release).
+2. Pick **one** pending Strategic/Constitutional item from GAP/ratification.
+3. Run a **manual** AI-IRB rehearsal: Grok + OpenAI + Anthropic with *different* role manifests → advisories + mandatory dissent → Bob/Max dual ratify or veto.
+4. Only then automate daily brief + Slack push.
+
+If the rehearsal feels noisy or theatrical, stop — do not scale automation.
+
+## CCIRs, tempos, and kill criteria
+
+- **CCIRs (Commander’s Critical Information Requirements):** explicit list of what *must* interrupt Bob via Slack/SMS. Everything else stays off push channels. Living list in `docs/c2/CCIR.md`.
+- **Two tempos (OODA):** daily brief = deliberate; blocker push = crisis. Do not merge queues or SLAs.
+- **Kill criteria on every Mission Graph node:** if tripwired → escalate as blocker; if not tripwired → do not push.
+- **Objection window:** reuse OGP pattern (default 72h silence = green-light for non-blocker ratifications); objection by either Bob or Max halts.
+
+## Adversarial counters (must be designed in)
+
+| Risk | Why it bites | Counter |
+|------|----------------|---------|
+| **Assurance theater** | Fancy model names, weak evidence | No brief item without council route + receipt; dissent mandatory |
+| **Correlation quorum** | Three frontier models ≈ one vote | Quorum = providers × evidence-classes; role-split contexts |
+| **Alert fatigue** | Everything escalates → mute Slack | CCIRs + trigger taxonomy + fingerprint dedupe + coalesce |
+| **Slack = authority** | Emoji “approve” without identity | Ack only in Slack; ratify/veto only signed desk + dual gate when required |
+| **Second status ledger** | C2 graph drifts from GAP-REGISTRY | Reference-only statuses; later guard script |
+| **Silent push failure** | Blocker dies unread | Slack→SMS→`chairman_unreachable` on next brief |
+| **Seat spoofing** | Model swap under same name | Seat re-attestation / behavioral fingerprint on change (D9) |
+| **Adjacent trust bleed** | CommandBase claims constitutional force | Intake + fail-closed; desk displays EXOCHAIN facts only |
+| **Single-human capture** | One principal rubber-stamps irreversible acts | Bob + Max two-person / two-system gate |
+
+## Chaos drill
+
+Monthly (scheduled): kill Slack primary and confirm SMS path; inject a fake unanimous IRB with empty evidence and confirm fail-closed (item never reaches brief as binding). Record drill receipt; repeated drill failure is itself a CCIR blocker.
 
 ## Real-time Executive Chairman escalation (blockers)
 
@@ -192,11 +254,13 @@ Create `docs/c2/`:
 
 1. **README.md** — WHY/HOW split; presidential attention policy; what reaches your desk vs auto-route.
 2. **MISSION-GRAPH.md** + **mission-graph.yaml** — ecosystem Mermaid + 10 workstream nodes (core, proofs, runtime wiring, identity, AVC, DAG DB, TEE, economy, platform, adjacent).
-3. **nodes/\<id\>.md** — intent, deps Mermaid, SSOT links, Steer Packs for HOW teams.
-4. **AI-IRB-COHORT.md** — active vs planned seats; role matrix; quorum rules; model-change re-attestation.
+3. **nodes/\<id\>.md** — intent, deps Mermaid, SSOT links, kill criteria, Steer Packs for HOW teams.
+4. **AI-IRB-COHORT.md** — active vs planned seats; role matrix (incl. permanent devil’s advocate); quorum rules; model-change re-attestation.
 5. **DAILY-ATTENTION-PROTOCOL.md** — brief schema, exception filter, required council+receipt preconditions, challenge/inquire/ratify/veto action vocabulary.
 6. **CHAIRMAN-ESCALATION.md** — real-time blocker triggers, Slack→SMS precedence, receipt schema, dedupe/coalesce, inbound ack rules.
-7. **PROGRESS.md** — rollup-by-reference only; link from [docs/INDEX.md](../../INDEX.md).
+7. **CCIR.md** — Commander’s Critical Information Requirements (what may push Slack/SMS).
+8. **TWO-PERSON-GATE.md** — Bob (`bob-stewart`) + Max (`mstewartbz`) dual attestation; decision classes; receipt schema.
+9. **PROGRESS.md** — rollup-by-reference only; link from [docs/INDEX.md](../../INDEX.md).
 
 ### Phase 2 — Daily Attention Orchestrator (core + adapter)
 
@@ -235,9 +299,9 @@ Extend Mission Control ([command-base/](../../../command-base/)) with intake upd
 
 1. **Morning:** open Presidential Daily Brief (desk or markdown/API emission) — greet + N decisions only.
 2. For each item: read crosschecked advisories + receipts; ask / challenge as needed.
-3. **Ratify** → HOW agents execute under that intent (Steer Packs / Archon / Mission Graph node).
-4. **Veto** → item returns to council with veto rationale; no HOW execution.
-5. **Anytime (blockers):** Slack (or SMS) push as Executive Chairman → open dossier → inquire / challenge / ratify / veto; every push is receipted.
+3. **Ratify** — Operational (policy-allowed): Bob may close alone. Constitutional/irreversible: Bob + Max dual attestation → then HOW agents execute.
+4. **Veto** — either Bob or Max may veto; item returns to council with rationale; no HOW execution.
+5. **Anytime (blockers / CCIRs only):** Slack (or SMS) push → open dossier → inquire / challenge / ratify / veto; every push is receipted.
 6. **Between briefs:** Mission Graph for situational drill-down and proactive intent edits (WHY), not for micromanaging HOW.
 
 ## What we will explicitly not do
@@ -249,15 +313,20 @@ Extend Mission Control ([command-base/](../../../command-base/)) with intake upd
 - Claim CommandBase UI itself is constitutional authority.
 - Let blockers die in a queue with no Chairman push path.
 - Approve/ratify solely from an unauthenticated Slack emoji without identity envelope + recorded action.
+- Allow agents or a single principal to close irreversible / constitutional actions.
+- Push non-CCIR noise to Slack/SMS.
+- Automate Railway/Slack C2 before the manual dogfood slice calibrates CCIRs.
 
 ## Validation
 
 - Brief generator rejects items lacking council route or receipt-bearing crosschecks (fail closed tests).
-- AI-IRB session with DeterministicResponseProvider proves multi-seat scoring + dissent receipts in CI.
+- AI-IRB session with DeterministicResponseProvider proves multi-seat scoring + dissent receipts in CI; devil’s advocate seat always present.
 - Live adapter tests (feature-gated / mocked HTTP) for xAI, OpenAI, Anthropic seat manifests.
 - Planned seats remain non-voting until configured.
 - Single Source Rule: Mission Graph / brief reference GAP IDs only.
 - Contestation + ratify/veto paths covered by `decision-forum` tests; gateway/MCP adapter tests for desk actions.
-- Escalation tests: trigger → Slack mock delivery receipt; Slack fail → SMS fallback; both fail → `chairman_unreachable` on next brief; dedupe by fingerprint.
+- Dual-gate tests: constitutional ratify fails with only `bob-stewart` or only `mstewartbz`; succeeds only with both distinct attestations; agent identity rejected for either half.
+- Escalation tests: trigger → Slack mock delivery receipt; Slack fail → SMS fallback; both fail → `chairman_unreachable` on next brief; dedupe by fingerprint; non-CCIR must not push.
+- Chaos drill: empty-evidence unanimous IRB rejected; Slack-down SMS path proven.
 - Adjacent Phase 3: intake record + fail-closed without EXOCHAIN API; Slack/Twilio secrets not exposed on status routes.
 - Topology: Railway health/ready probes green for new services; GitHub workflow deploys from commit SHA; scheduled brief job documented and fail-closed when Railway env missing.
