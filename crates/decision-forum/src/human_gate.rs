@@ -140,6 +140,101 @@ pub fn is_ai_vote(vote: &Vote) -> bool {
     matches!(vote.actor_kind, ActorKind::AiAgent { .. })
 }
 
+/// GitHub login for Executive Chairman / CTO (Bob Stewart).
+pub const PRINCIPAL_BOB_GITHUB: &str = "bob-stewart";
+
+/// GitHub login for co-principal (Max Stewart).
+pub const PRINCIPAL_MAX_GITHUB: &str = "mstewartbz";
+
+/// Locked two-person / two-system gate policy for irreversible presidential acts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoPersonGatePolicy {
+    pub principal_a: Did,
+    pub principal_b: Did,
+    pub github_a: String,
+    pub github_b: String,
+}
+
+impl TwoPersonGatePolicy {
+    /// Construct the Bob (`bob-stewart`) + Max (`mstewartbz`) presidential gate.
+    pub fn presidential() -> Result<Self> {
+        Ok(Self {
+            principal_a: Did::new("did:exo:principal:bob-stewart")
+                .map_err(|e| ForumError::Core(e.to_string()))?,
+            principal_b: Did::new("did:exo:principal:mstewartbz")
+                .map_err(|e| ForumError::Core(e.to_string()))?,
+            github_a: PRINCIPAL_BOB_GITHUB.into(),
+            github_b: PRINCIPAL_MAX_GITHUB.into(),
+        })
+    }
+}
+
+fn verified_principal_approve(
+    decision: &DecisionObject,
+    verified_human_voters: &BTreeSet<Did>,
+    principal: &Did,
+) -> bool {
+    decision.votes.iter().any(|vote| {
+        &vote.voter_did == principal
+            && matches!(vote.choice, crate::decision_object::VoteChoice::Approve)
+            && is_verified_human_vote(vote, verified_human_voters)
+    })
+}
+
+/// Enforce Bob+Max dual attestation for irreversible ratification.
+///
+/// Both principals must cast verified human `Approve` votes. Agent identities
+/// and non-principal humans cannot satisfy either half of the gate.
+pub fn enforce_two_person_ratification(
+    decision: &DecisionObject,
+    verified_human_voters: &BTreeSet<Did>,
+    policy: &TwoPersonGatePolicy,
+) -> Result<()> {
+    if two_person_veto_present(decision, verified_human_voters, policy) {
+        return Err(ForumError::TwoPersonGateRequired {
+            reason: "principal veto present; ratification blocked".into(),
+        });
+    }
+
+    let a_ok = verified_principal_approve(decision, verified_human_voters, &policy.principal_a);
+    let b_ok = verified_principal_approve(decision, verified_human_voters, &policy.principal_b);
+
+    if a_ok && b_ok {
+        return Ok(());
+    }
+
+    if !a_ok && !b_ok {
+        return Err(ForumError::TwoPersonGateRequired {
+            reason: format!(
+                "missing attestations from {} and {}",
+                policy.github_a, policy.github_b
+            ),
+        });
+    }
+    if !a_ok {
+        return Err(ForumError::TwoPersonGateRequired {
+            reason: format!("missing attestation from {}", policy.github_a),
+        });
+    }
+    Err(ForumError::TwoPersonGateRequired {
+        reason: format!("missing attestation from {}", policy.github_b),
+    })
+}
+
+/// Returns true when either locked principal has cast a verified `Reject`.
+#[must_use]
+pub fn two_person_veto_present(
+    decision: &DecisionObject,
+    verified_human_voters: &BTreeSet<Did>,
+    policy: &TwoPersonGatePolicy,
+) -> bool {
+    decision.votes.iter().any(|vote| {
+        (&vote.voter_did == &policy.principal_a || &vote.voter_did == &policy.principal_b)
+            && matches!(vote.choice, crate::decision_object::VoteChoice::Reject)
+            && is_verified_human_vote(vote, verified_human_voters)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -313,5 +408,122 @@ mod tests {
             p.human_required_classes
                 .contains(&DecisionClass::Constitutional)
         );
+    }
+
+    fn principal_vote(did: Did, choice: VoteChoice, clock: &mut HybridClock) -> Vote {
+        Vote {
+            voter_did: did,
+            choice,
+            actor_kind: ActorKind::Human,
+            timestamp: clock.now().expect("HLC timestamp"),
+            signature_hash: Hash256::digest(b"principal-sig"),
+        }
+    }
+
+    #[test]
+    fn two_person_ratify_requires_bob_and_max() {
+        let mut clock = test_clock();
+        let policy = TwoPersonGatePolicy::presidential().expect("policy");
+        let mut d = make_decision(DecisionClass::Constitutional, &mut clock);
+        let mut verified = BTreeSet::new();
+        verified.insert(policy.principal_a.clone());
+        verified.insert(policy.principal_b.clone());
+
+        d.add_vote(principal_vote(
+            policy.principal_a.clone(),
+            VoteChoice::Approve,
+            &mut clock,
+        ))
+        .expect("bob vote");
+        let only_bob = enforce_two_person_ratification(&d, &verified, &policy)
+            .expect_err("Max required");
+        assert!(matches!(only_bob, ForumError::TwoPersonGateRequired { .. }));
+        assert!(only_bob.to_string().contains("mstewartbz"));
+
+        d.add_vote(principal_vote(
+            policy.principal_b.clone(),
+            VoteChoice::Approve,
+            &mut clock,
+        ))
+        .expect("max vote");
+        assert!(enforce_two_person_ratification(&d, &verified, &policy).is_ok());
+    }
+
+    #[test]
+    fn two_person_ratify_fails_with_only_max() {
+        let mut clock = test_clock();
+        let policy = TwoPersonGatePolicy::presidential().expect("policy");
+        let mut d = make_decision(DecisionClass::Constitutional, &mut clock);
+        let mut verified = BTreeSet::new();
+        verified.insert(policy.principal_b.clone());
+        d.add_vote(principal_vote(
+            policy.principal_b.clone(),
+            VoteChoice::Approve,
+            &mut clock,
+        ))
+        .expect("max vote");
+        let err = enforce_two_person_ratification(&d, &verified, &policy).unwrap_err();
+        assert!(err.to_string().contains("bob-stewart"));
+    }
+
+    #[test]
+    fn two_person_gate_rejects_agent_as_principal_half() {
+        let mut clock = test_clock();
+        let policy = TwoPersonGatePolicy::presidential().expect("policy");
+        let mut d = make_decision(DecisionClass::Constitutional, &mut clock);
+        let mut verified = BTreeSet::new();
+        verified.insert(policy.principal_a.clone());
+        // Agent attempts to vote using Max's DID — actor_kind AI fails verification.
+        d.add_vote(Vote {
+            voter_did: policy.principal_b.clone(),
+            choice: VoteChoice::Approve,
+            actor_kind: ActorKind::AiAgent {
+                delegation_id: "agent".into(),
+                ceiling_class: DecisionClass::Operational,
+            },
+            timestamp: clock.now().expect("HLC"),
+            signature_hash: Hash256::digest(b"ai"),
+        })
+        .expect("ai vote");
+        d.add_vote(principal_vote(
+            policy.principal_a.clone(),
+            VoteChoice::Approve,
+            &mut clock,
+        ))
+        .expect("bob");
+        verified.insert(policy.principal_b.clone());
+        let err = enforce_two_person_ratification(&d, &verified, &policy).unwrap_err();
+        assert!(matches!(err, ForumError::TwoPersonGateRequired { .. }));
+    }
+
+    #[test]
+    fn either_principal_veto_blocks_ratification() {
+        let mut clock = test_clock();
+        let policy = TwoPersonGatePolicy::presidential().expect("policy");
+        let mut d = make_decision(DecisionClass::Constitutional, &mut clock);
+        let mut verified = BTreeSet::new();
+        verified.insert(policy.principal_a.clone());
+        verified.insert(policy.principal_b.clone());
+        d.add_vote(principal_vote(
+            policy.principal_a.clone(),
+            VoteChoice::Approve,
+            &mut clock,
+        ))
+        .expect("bob approve");
+        d.add_vote(principal_vote(
+            policy.principal_b.clone(),
+            VoteChoice::Reject,
+            &mut clock,
+        ))
+        .expect("max veto");
+        assert!(two_person_veto_present(&d, &verified, &policy));
+        assert!(enforce_two_person_ratification(&d, &verified, &policy).is_err());
+    }
+
+    #[test]
+    fn presidential_policy_locks_github_identities() {
+        let policy = TwoPersonGatePolicy::presidential().expect("policy");
+        assert_eq!(policy.github_a, "bob-stewart");
+        assert_eq!(policy.github_b, "mstewartbz");
     }
 }

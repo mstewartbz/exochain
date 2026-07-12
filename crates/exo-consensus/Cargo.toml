@@ -28,7 +28,9 @@ publish.workspace = true
 default = []
 anthropic = []
 openai = []
+xai = []
 google = []
+providers = ["anthropic", "openai", "xai"]
 
 [dependencies]
 serde.workspace = true
