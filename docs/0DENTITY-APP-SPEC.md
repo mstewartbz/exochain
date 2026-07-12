@@ -18,11 +18,39 @@ SPDX-License-Identifier: Apache-2.0
 
 # 0dentity — Application Requirements Specification
 
-> **Version**: 1.0.0-draft
-> **Date**: 2026-04-04
-> **Status**: Canonical reference for implementation
-> **Scope**: Complete sovereign identity scoring application built on ExoChain
-> **Audience**: Any AI or human implementor. This document is self-contained.
+> **Version**: 1.1.0-as-built  
+> **Date**: 2026-07-12  
+> **Status**: Canonical reference aligned to exo-node implementation; where prose conflicts with the audit banners below, **the banners + source code win**  
+> **Scope**: Complete sovereign identity scoring application built on ExoChain  
+> **Audience**: Any AI or human implementor. This document is self-contained.  
+
+---
+
+## Normative product rules (identity-first fertiliser I1–I4, 2026-07-12)
+
+### I1 — Public first-touch product rule
+
+| Environment | Rule |
+|-------------|------|
+| **Production / default build** | `POST /api/v1/0dentity/claims` for ordinary claim creation is **closed**. Server returns structured `403` `zerodentity_first_touch_onboarding_disabled` unless the crate is built with `--features …/unaudited-zerodentity-first-touch-onboarding`. |
+| **Lab / feature-on** | First-touch is **proof-of-possession only**: `subject_did` MUST equal `did:exo:<bs58(blake3(public_key))>`; body must carry non-empty Ed25519 `signature` over the domain-tagged claim CBOR payload; OTP success requires bootstrap signature binding the same key before a session token is minted. |
+| **Forbidden forever** | Assigning a subject DID without key binding; minting UUID-only sessions without bootstrap crypto; silent success when sig fails. |
+
+This rule is implemented in `crates/exo-node/src/zerodentity/onboarding.rs` and is **not** optional narrative.
+
+### I2 — Auth matrix (API)
+
+Mutating subject routes require **signed write** (Bearer session + `X-Exo-Nonce` + `X-Exo-Sig` verified against session public key). Owner-private GETs require **owner session** (Bearer of a non-expired session for that DID). Challenge resend is OTP-challenge-bound without a user session.
+
+Authoritative table: module docs on `crates/exo-node/src/zerodentity/api.rs` (“Auth matrix (I2)”).
+
+### I3 — Attestation verify-before-store
+
+`create_attestation` **always** calls `verify_attestation_signature` and rejects empty/zero/wrong-key/tampered payloads. The HTTP handler additionally requires signed-write auth and session key == `attester_public_key`. There is no store path that accepts an attestation without that verify.
+
+### I4 — Device / behavioral product claims (hold-ship)
+
+Default marketing and scoring **must** present `device_trust` and `behavioral_signature` as **unavailable / zero under default configuration**. Optional lab enablement is consent-gated and flag-gated (see Onyx-4 R3 / VCG-009 banner). Do not claim continuous biometric scoring is “always on” in product UI when the feature is off.
 
 ---
 
@@ -261,7 +289,13 @@ pub struct ZerodentityScore {
 }
 
 /// The 8 axes of the 0dentity polar graph.
-/// Each axis is scored 0–100 independently.
+/// Each axis is scored 0–100 independently in product language.
+///
+/// **Implementation (I6):** Production Rust scoring uses `u32` basis points
+/// (0–10_000), not f64. The f64 sketches below are illustrative. Code law:
+/// `exo-node::zerodentity::scoring`. Axes `device_trust` /
+/// `behavioral_signature` score hard-zero unless
+/// `unaudited-zerodentity-device-behavioral-axes` is enabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolarAxes {
     /// Verified reachability: email + phone channels.
@@ -1531,7 +1565,19 @@ class PolarGraph {
 
 ## 7. API Specification
 
-All endpoints under `/api/v1/0dentity/`. Authentication: session token from initial claim (Bearer header). Write operations require token; reads are public (constitutional transparency).
+All endpoints under `/api/v1/0dentity/`.
+
+### 7.0 Authentication (normative — override any older “reads are public” prose)
+
+| Surface | Auth |
+|---------|------|
+| `GET /:did/score`, `GET /:did/claims`, `GET /:did/score/history`, `GET /:did/fingerprints` | **Owner session only**: `Authorization: Bearer <session_token>` whose `subject_did` matches `:did`. Security scans and average public dashboards must not assume unauthenticated score dumps. |
+| `POST /:did/attest`, `DELETE /:did` | **Signed session write**: Bearer + `X-Exo-Nonce` + `X-Exo-Sig` over domain-tagged request CBOR (`exo.zerodentity.session_request.v1`), nonce single-use per session. |
+| `POST /claims` | See **I1** — default refuse; feature-on PoP body signature. Device/behavioral ingest branch requires flag + PoP + consent (VCG-009). |
+| `POST /verify` | OTP correctness plus **bootstrap** PoP for session mint: public key derives session DID. |
+| `POST /verify/resend` | Challenge-id bound; resend cooldown; replaces secret via domain-derived resend material (not an open spam endpoint). |
+
+There is **no** `GET /server-key` route (ONYX-4 R6 removed fabrications).
 
 ### 7.1 Onboarding Endpoints
 
