@@ -20,7 +20,7 @@ use exo_core::{Hash256, Timestamp, hash::hash_structured};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bailment::BailmentWrapper,
+    bailment::{BailmentTerms, BailmentWrapper, BailmentWrapperStatus},
     contribution_acceptance::ContributionAcceptance,
     contribution_offer::ContributionOffer,
     error::EconomyError,
@@ -232,6 +232,103 @@ impl UseEvent {
                 field: "use_event.bailment_wrapper_id",
             });
         }
+        Ok(())
+    }
+
+    /// Validate a commercially licensed product use against the complete
+    /// bailment and usage-accounting chain.
+    ///
+    /// This check fails closed unless the terms require settlement, the
+    /// wrapper is active, every hash-bound record retains canonical integrity,
+    /// and the adopter, product/system, mission, and HLC sequence agree.
+    pub fn validate_commercial_licensure(
+        &self,
+        adoption: &AdoptionEvent,
+        wrapper: &BailmentWrapper,
+        terms: &BailmentTerms,
+    ) -> Result<(), EconomyError> {
+        self.validate_against_adoption(adoption)?;
+        adoption.validate()?;
+        wrapper.validate()?;
+        terms.validate()?;
+
+        if wrapper.status != BailmentWrapperStatus::Active {
+            return Err(EconomyError::AutomatedSettlementRejected {
+                reason: "commercial licensure bailment wrapper must be active".into(),
+            });
+        }
+        if !terms.settlement_required {
+            return Err(EconomyError::AutomatedSettlementRejected {
+                reason: "commercial licensure terms must require settlement".into(),
+            });
+        }
+
+        if terms.recompute_content_hash()? != terms.terms_id || terms.content_hash != terms.terms_id
+        {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.terms_id",
+            });
+        }
+        if wrapper.recompute_content_hash()? != wrapper.wrapper_id
+            || wrapper.content_hash != wrapper.wrapper_id
+        {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.wrapper_id",
+            });
+        }
+        if adoption.recompute_content_hash()? != adoption.adoption_id
+            || adoption.content_hash != adoption.adoption_id
+        {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.adoption_id",
+            });
+        }
+        if self.recompute_content_hash()? != self.use_event_id
+            || self.content_hash != self.use_event_id
+        {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.use_event_id",
+            });
+        }
+
+        if wrapper.accepted_bailment_terms_hash != terms.terms_id {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.accepted_bailment_terms_hash",
+            });
+        }
+        if wrapper.contribution_node_id != adoption.contribution_node_id
+            || wrapper.accepted_terms_hash != adoption.accepted_terms_hash
+        {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.adoption_wrapper_binding",
+            });
+        }
+        if wrapper.bailor_ref != terms.bailor_ref || wrapper.bailee_ref != adoption.adopter_ref {
+            return Err(EconomyError::InvalidInput {
+                reason: "commercial licensure parties do not match the adoption bailment".into(),
+            });
+        }
+        if self.using_system != adoption.adopting_system {
+            return Err(EconomyError::InvalidInput {
+                reason: "commercial use must be recorded by the licensed adopting system".into(),
+            });
+        }
+        if self.mission_id != adoption.mission_id {
+            return Err(EconomyError::HashMismatch {
+                field: "commercial_licensure.mission_id",
+            });
+        }
+        if wrapper.created_at_hlc < terms.created_at_hlc
+            || adoption.created_at_hlc < wrapper.created_at_hlc
+            || self.created_at_hlc < adoption.created_at_hlc
+        {
+            return Err(EconomyError::InvalidInput {
+                reason:
+                    "commercial licensure terms, wrapper, adoption, and use HLC order is invalid"
+                        .into(),
+            });
+        }
+
         Ok(())
     }
 
@@ -511,6 +608,69 @@ mod tests {
                 .validate_commercial_licensure(&adoption, &wrapper, &terms)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn commercial_use_rejects_tampered_records_mission_and_event_order() {
+        let adoption = sample_adoption().anchor().unwrap();
+        let use_event = sample_use_event().anchor().unwrap();
+        let wrapper = sample_wrapper().anchor().unwrap();
+        let terms = sample_terms().anchor().unwrap();
+
+        let mut tampered_terms = terms.clone();
+        tampered_terms.content_hash = h(0xC0);
+        assert!(matches!(
+            use_event.validate_commercial_licensure(&adoption, &wrapper, &tampered_terms),
+            Err(crate::error::EconomyError::HashMismatch {
+                field: "commercial_licensure.terms_id"
+            })
+        ));
+
+        let mut tampered_wrapper = wrapper.clone();
+        tampered_wrapper.content_hash = h(0xC1);
+        assert!(matches!(
+            use_event.validate_commercial_licensure(&adoption, &tampered_wrapper, &terms),
+            Err(crate::error::EconomyError::HashMismatch {
+                field: "commercial_licensure.wrapper_id"
+            })
+        ));
+
+        let mut tampered_adoption = adoption.clone();
+        tampered_adoption.content_hash = h(0xC2);
+        assert!(matches!(
+            use_event.validate_commercial_licensure(&tampered_adoption, &wrapper, &terms),
+            Err(crate::error::EconomyError::HashMismatch {
+                field: "commercial_licensure.adoption_id"
+            })
+        ));
+
+        let mut tampered_use = use_event.clone();
+        tampered_use.content_hash = h(0xC3);
+        assert!(matches!(
+            tampered_use.validate_commercial_licensure(&adoption, &wrapper, &terms),
+            Err(crate::error::EconomyError::HashMismatch {
+                field: "commercial_licensure.use_event_id"
+            })
+        ));
+
+        let mut wrong_mission = use_event.clone();
+        wrong_mission.mission_id = Some(h(0xC4));
+        let wrong_mission = wrong_mission.anchor().unwrap();
+        assert!(matches!(
+            wrong_mission.validate_commercial_licensure(&adoption, &wrapper, &terms),
+            Err(crate::error::EconomyError::HashMismatch {
+                field: "commercial_licensure.mission_id"
+            })
+        ));
+
+        let mut early_use = use_event;
+        early_use.created_at_hlc = crate::value_contribution::test_support::ts(1_999);
+        let early_use = early_use.anchor().unwrap();
+        assert!(matches!(
+            early_use.validate_commercial_licensure(&adoption, &wrapper, &terms),
+            Err(crate::error::EconomyError::InvalidInput { reason })
+                if reason.contains("HLC order")
+        ));
     }
 
     #[test]
