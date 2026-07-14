@@ -22,6 +22,34 @@ app_dir="$repo_root/demo/apps/livesafe"
 vite_config="$app_dir/vite.config.ts"
 package_json="$app_dir/package.json"
 package_lock="$app_dir/package-lock.json"
+license_file="$app_dir/LICENSE"
+intake_file="$app_dir/INTAKE.md"
+
+[ -f "$license_file" ] || {
+  echo "LiveSafe demo proprietary LICENSE is required" >&2
+  exit 1
+}
+grep -F 'Proprietary and Confidential' "$license_file" >/dev/null
+grep -F 'No license, express or implied, is granted' "$license_file" >/dev/null
+
+[ -f "$intake_file" ] || {
+  echo "LiveSafe demo adjacent-surface intake is required" >&2
+  exit 1
+}
+for intake_boundary in \
+  'Accountable maintainer:' \
+  'Deployment status:' \
+  'not allowed to claim EXOCHAIN constitutional enforcement' \
+  'Direct EXOCHAIN core reads: none' \
+  'Direct EXOCHAIN core writes: none' \
+  'Boundary guard:' \
+  'Runtime source:' \
+  'Disablement:'; do
+  grep -F "$intake_boundary" "$intake_file" >/dev/null || {
+    echo "LiveSafe demo intake missing boundary: $intake_boundary" >&2
+    exit 1
+  }
+done
 
 if grep -Eq 'allowedHosts:[[:space:]]*true' "$vite_config"; then
   echo "LiveSafe demo Vite preview must not disable Host header checks" >&2
@@ -49,6 +77,14 @@ if (!rootLock) {
   throw new Error('LiveSafe demo package-lock.json must include root package metadata');
 }
 
+if (manifest.private !== true || manifest.license !== 'UNLICENSED') {
+  throw new Error('LiveSafe demo manifest must remain private and UNLICENSED');
+}
+
+if (rootLock.license !== 'UNLICENSED') {
+  throw new Error('LiveSafe demo package-lock root must remain UNLICENSED');
+}
+
 for (const section of ['dependencies', 'devDependencies']) {
   const declared = manifest[section] || {};
   const locked = rootLock[section] || {};
@@ -64,5 +100,17 @@ for (const section of ['dependencies', 'devDependencies']) {
   }
 }
 NODE
+
+apache_spdx='SPDX-License-Identifier: Apache-''2.0'
+apache_grant='Licensed under the Apache'' License'
+if git -C "$repo_root" grep -n -e "$apache_spdx" -e "$apache_grant" -- demo/apps/livesafe; then
+  echo "LiveSafe demo files must not retain Apache-2.0 grants" >&2
+  exit 1
+fi
+
+grep -F '"demo/apps/livesafe/",' "$repo_root/tools/license_headers.py" >/dev/null || {
+  echo "Apache header utility must exclude the LiveSafe demo" >&2
+  exit 1
+}
 
 echo "LiveSafe demo security guard passed"
