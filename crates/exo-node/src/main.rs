@@ -829,6 +829,17 @@ async fn start_node(
             // ratified decision D5, the kernel must reject this until a real
             // external attestation source (a distinct witnessing party) is
             // wired in — tracked in `Initiatives/fix-onyx-4-r5-holons-stub-context.md`.
+            //
+            // I5 wiring contract (identity-first fertiliser): to enable real
+            // Holon steps once ceremony material exists, populate
+            // `root_attestation: Some(RootAttestation { attester_did,
+            // attester_public_key, attester_signer })` where BOTH
+            // `attester_did != root_did` AND `attester_public_key !=
+            // root_public_key`. Do not invent key material at runtime;
+            // ceremony load belongs to operator config / HSM pipeline.
+            // Enabling `unaudited-infrastructure-holons` without that material
+            // still fails closed at the kernel for production-like configs
+            // that leave `root_attestation: None`.
             root_attestation: None,
             provenance_timestamp_source: holons::hlc_provenance_timestamp_source(),
             topology_interval_secs: 60,

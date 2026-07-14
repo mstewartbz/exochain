@@ -541,4 +541,34 @@ mod tests {
         let pk = *id.public_key();
         assert_eq!(&pk, id.public_key());
     }
+
+    /// I7 residual: SDK local identity handles use truncated-hex DIDs that
+    /// do **not** match the fabric `did:exo:<bs58(blake3(pk))>` bind used by
+    /// 0dentity, node identity, and exo_identity::did::did_from_public_key.
+    /// Adjacent adapters must call `from_resolved_keypair` with fabric DIDs
+    /// rather than treating SDK-local DIDs as settlement identities.
+    #[test]
+    fn local_sdk_did_is_not_fabric_self_certifying_bind() {
+        use exo_identity::did::did_from_public_key as fabric_bind;
+        let id = Identity::generate("bridge");
+        let fabric = fabric_bind(id.public_key()).expect("fabric bind");
+        assert_ne!(
+            id.did().as_str(),
+            fabric.as_str(),
+            "SDK truncated-hex DID must not silently equal fabric bind"
+        );
+        assert!(
+            fabric.as_str().len() > id.did().as_str().len(),
+            "fabric bind is longer (full base58 digest suffix)"
+        );
+        // Bridging pattern: preserve fabric DID while keeping local keys.
+        let bridged = Identity::from_resolved_keypair(
+            "bridge",
+            fabric.clone(),
+            *id.public_key(),
+            SecretKey::from_bytes(*id.secret.as_bytes()),
+        )
+        .expect("bridge");
+        assert_eq!(bridged.did(), &fabric);
+    }
 }
