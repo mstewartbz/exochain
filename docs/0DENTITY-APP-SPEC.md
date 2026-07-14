@@ -18,11 +18,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # 0dentity — Application Requirements Specification
 
-> **Version**: 1.1.0-as-built  
-> **Date**: 2026-07-12  
-> **Status**: Canonical reference aligned to exo-node implementation; where prose conflicts with the audit banners below, **the banners + source code win**  
-> **Scope**: Complete sovereign identity scoring application built on ExoChain  
-> **Audience**: Any AI or human implementor. This document is self-contained.  
+> **Version**: 1.1.0-as-built
+> **Date**: 2026-07-12
+> **Status**: Canonical reference aligned to exo-node implementation; where prose conflicts with the audit banners below, **the banners + source code win**
+> **Scope**: Complete sovereign identity scoring application built on ExoChain
+> **Audience**: Any AI or human implementor. This document is self-contained.
 
 ---
 
