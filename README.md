@@ -35,7 +35,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 |--------|-------|--------|
 | Rust crates | 31 | `ls -d crates/*/` |
 | Rust source files | 471 | `git ls-files 'crates/**/*.rs'` |
-| Workspace tests | 6,258 listed | `cargo test --workspace -- --list` |
+| Workspace tests | 6,264 listed | `cargo test --workspace -- --list` |
 | CI quality gates | 23 | `.github/workflows/ci.yml` numbered gates; required aggregator is separate |
 | Latest published release | `v0.2.1-beta` (GitHub Release published 2026-07-08; `exochain-core` on crates.io and `@exochain/llm-proxy` on npm resolve the same version) | `gh release list`; `cargo search exochain-core`; `npm view @exochain/llm-proxy version` |
 | License | Apache-2.0 for EXOCHAIN core primitives; commercial terms for Decision Forum, LegalDyne, CyberMedica, LiveSafe, and CrossChecked products | `governance/commercial-product-licensing.json`; product license files where present |
@@ -43,7 +43,7 @@ EXOCHAIN is a verifiable, privacy-preserving substrate enabling secure identity 
 
 ### What is verified today
 
-- **6,258 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
+- **6,264 workspace tests are listed** by `cargo test --workspace -- --list`; CI Gate 2 runs them in debug and release modes
 - **Build succeeds** for all library crates, binaries, tests, and benchmarks
 - **Clippy clean** under `-D warnings` for all workspace targets
 - **Format clean** under `cargo +nightly fmt --all -- --check`
@@ -126,7 +126,7 @@ Catalyst is named explicitly.
 Layer 1: CGR Kernel         (Rust, 31 crates)
          Constitutional governance runtime — deterministic, no floats,
          production Ed25519/BLAKE3 cryptography plus unaudited pedagogical
-         SNARK/STARK/ZKML skeletons, 6,258 listed workspace tests
+         SNARK/STARK/ZKML skeletons, 6,264 listed workspace tests
 
 Layer 2: WASM Bridge        (packages/exochain-wasm/)
          165 verified WASM exports covered by 172 bridge checks — Rust -> WebAssembly -> JavaScript
