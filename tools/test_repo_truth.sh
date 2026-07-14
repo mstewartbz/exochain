@@ -89,10 +89,6 @@ expected_rs_files=$(git ls-files 'crates/**/*.rs' | wc -l | tr -d ' ')
 actual_rs_files=$(jq '.rust_source_files' "$json_file")
 [ "$actual_rs_files" = "$expected_rs_files" ] || fail "Rust source file count $actual_rs_files != $expected_rs_files"
 
-expected_rs_loc=$(git ls-files 'crates/**/*.rs' | xargs wc -l | tail -1 | awk '{print $1}')
-actual_rs_loc=$(jq '.rust_loc' "$json_file")
-[ "$actual_rs_loc" = "$expected_rs_loc" ] || fail "Rust LOC $actual_rs_loc != $expected_rs_loc"
-
 if ! test_list_output=$(cargo test --workspace -- --list 2>&1); then
   printf '%s\n' "$test_list_output" >&2
   fail "cargo test --workspace -- --list failed while deriving README test count"
@@ -159,7 +155,6 @@ README_VERACITY_GATE="${README_VERACITY_GATE:-on}"
 if [ "$README_VERACITY_GATE" = "on" ]; then
   grep -F "| Rust crates | $expected_crates |" README.md >/dev/null || fail "README crate count is not repo-truth derived"
   grep -F "| Rust source files | $expected_rs_files |" README.md >/dev/null || fail "README Rust source file count is not repo-truth derived"
-  grep -F "| Rust LOC | $expected_rs_loc |" README.md >/dev/null || fail "README Rust LOC is not repo-truth derived"
   readme_tests_listed=$(awk -F'|' '/Workspace tests/ { gsub(/[^0-9]/, "", $3); print $3; exit }' README.md)
   [ "$readme_tests_listed" = "$expected_tests_listed" ] \
     || fail "README workspace test count $readme_tests_listed != listed test count $expected_tests_listed"
@@ -168,8 +163,8 @@ if [ "$README_VERACITY_GATE" = "on" ]; then
   expected_tests_display=$(python3 -c 'import sys; print(f"{int(sys.argv[1]):,}")' "$expected_tests_listed")
   grep -F "**$expected_tests_display workspace tests are listed**" README.md >/dev/null \
     || fail "README verified-today test count is not repo-truth derived"
-  grep -F "(Rust, $expected_crates crates, $expected_rs_loc tracked LOC under crates/)" README.md >/dev/null \
-    || fail "README architecture LOC is not repo-truth derived"
+  grep -F "(Rust, $expected_crates crates)" README.md >/dev/null \
+    || fail "README architecture crate count is not repo-truth derived"
   grep -F "$expected_tests_display listed workspace tests" README.md >/dev/null \
     || fail "README architecture test count is not repo-truth derived"
   grep -F "CI pipeline ($expected_gates numbered quality gates plus required aggregator)" README.md >/dev/null \

@@ -55,7 +55,12 @@ active_ids = {
 }
 
 for warning_items in report.get("warnings", {}).values():
-    active_ids.update(item["advisory"]["id"] for item in warning_items)
+    active_ids.update(
+        advisory["id"]
+        for item in warning_items
+        if (advisory := item.get("advisory")) is not None
+        and advisory.get("id")
+    )
 
 with open(".cargo/audit.toml", "rb") as config_file:
     configured_ids = set(
