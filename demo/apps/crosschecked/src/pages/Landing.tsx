@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 import { Link } from 'react-router-dom';
 import {
   ShieldCheck,
@@ -46,9 +30,9 @@ const features = [
   },
   {
     icon: ScrollText,
-    title: 'Constitutional Governance',
+    title: 'Structured Governance',
     description:
-      'Decision classes from Operational to Constitutional ensure proportional review depth and quorum requirements.',
+      'Decision classes ensure proportional review depth and quorum requirements for this adjacent prototype.',
   },
   {
     icon: Grid3X3,
@@ -135,7 +119,7 @@ export default function Landing() {
         <div className="max-w-6xl mx-auto px-6 flex items-center justify-between">
           <p className="text-xs text-gray-500">
             Powered by{' '}
-            <span className="font-medium text-gray-400">EXOCHAIN</span> Trust Fabric
+            EXOCHAIN-adjacent prototype
           </p>
           <p className="text-xs text-gray-500">CrossChecked.ai v0.1.0</p>
         </div>

@@ -1,31 +1,25 @@
-<!--
-Copyright 2026 Exochain Foundation
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at:
-
-    https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-SPDX-License-Identifier: Apache-2.0
--->
-
 # ExoChain Demo
 
 ## Overview
 
-The ExoChain demo is a full-stack governance-conditioned execution platform comprising:
+The ExoChain demo is a proprietary adjacent prototype. It is not the canonical
+EXOCHAIN Rust trust fabric and cannot claim constitutional enforcement by
+proximity. It comprises:
 
 - **7 Node.js microservices** handling identity, consent, governance, decision-making, auditing, and provenance
 - **React web UI** with a 12-column configurable widget grid across 6 pages
-- **Rust-to-WASM engine** (637KB compiled, 45 exported functions) powering the core governance kernel
-- **PostgreSQL** for persistent storage of governance state, audit trails, and provenance records
+- **Rust-to-WASM adapter** generated separately from the Apache-2.0 core WASM primitive
+- **DAG DB gateway adapter** for authenticated, tenant-scoped persistence
+
+The quarantined PostgreSQL configuration is a legacy fixture enabled only by
+the `legacy-postgres-fixture` Compose profile. It is not a production writer.
+
+## Licensing
+
+Except for `packages/exochain-wasm`, this subtree is proprietary and
+`UNLICENSED`; see [LICENSE](LICENSE). CrossChecked and LiveSafe require written
+commercial terms, active EXOCHAIN bailment licensure, and EXOCHAIN usage
+accounting. The Apache-2.0 WASM wrapper does not license adjacent products.
 
 ## Prerequisites
 
@@ -45,7 +39,9 @@ npm run build:wasm
 npm run dev
 ```
 
-This runs `docker compose up` under the hood, starting all 7 services, the PostgreSQL database, and the web UI.
+This runs `docker compose up` under the hood after the required `EXO_DEMO_DAGDB_*`
+configuration is supplied. The legacy PostgreSQL fixture is not started unless
+its profile is explicitly enabled with a separately supplied password.
 
 ## Local Development (without Docker)
 

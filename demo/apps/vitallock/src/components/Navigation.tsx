@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import {
@@ -47,7 +31,7 @@ export default function Navigation({ displayName, odentityScore, onLogout }: Pro
         <h1 className="text-2xl font-bold tracking-tighter">
           VITAL<span className="text-emerald-400">LOCK</span>
         </h1>
-        <p className="text-[10px] text-zinc-500 mt-1">Powered by EXOCHAIN</p>
+        <p className="text-[10px] text-zinc-500 mt-1">EXOCHAIN-adjacent prototype</p>
       </div>
 
       {/* User + Score */}

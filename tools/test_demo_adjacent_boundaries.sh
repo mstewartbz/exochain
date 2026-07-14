@@ -67,7 +67,7 @@ fi
 
 tracked_demo_files="$(mktemp)"
 trap 'rm -f "$tracked_demo_files"' EXIT
-git ls-files demo | grep -Ev '(^|/)(node_modules|wasm)/' > "$tracked_demo_files"
+git ls-files demo | grep -Ev '(^demo/coverage/|(^|/)(node_modules|wasm)/)' > "$tracked_demo_files"
 
 if xargs grep -En \
   'exochain_dev|postgres://exochain:exochain|DATABASE_URL:-postgres://|POSTGRES_PASSWORD:[[:space:]]*exochain_dev' \
@@ -77,9 +77,9 @@ fi
 
 grep -Fq 'POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?' demo/infra/docker-compose.yml \
   || fail "compose must require POSTGRES_PASSWORD"
-grep -Fq 'DATABASE_URL is required' demo/packages/shared/src/index.js \
-  || fail "shared database helper must require DATABASE_URL"
-grep -Fq '${DATABASE_URL:?set DATABASE_URL' demo/scripts/dev.sh \
-  || fail "demo development script must require DATABASE_URL"
+grep -Fq 'requireDemoDagDbConfig' demo/packages/shared/src/dagdb-adapter.js \
+  || fail "shared persistence must require the DAG DB adapter configuration"
+grep -Fq '${EXO_DEMO_DAGDB_GATEWAY_URL:?set EXO_DEMO_DAGDB_GATEWAY_URL' demo/scripts/dev.sh \
+  || fail "demo development script must require the DAG DB gateway"
 
 printf 'demo adjacent-boundary test passed\n'

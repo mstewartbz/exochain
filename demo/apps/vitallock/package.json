@@ -8,15 +8,16 @@
     "prebuild": "cd ../../.. && wasm-pack build crates/exochain-wasm --target web --release --out-dir \"$PWD/demo/apps/vitallock/src/wasm\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test:security": "node tests/security-guards.mjs"
+    "test:security": "node tests/security-guards.mjs",
+    "surface-policy:check": "node scripts/check-surface-policy.mjs"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.65.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.5.0",
-    "@tanstack/react-query": "^5.65.0",
-    "lucide-react": "^0.475.0",
-    "clsx": "^2.1.1",
     "tailwind-merge": "^3.0.2"
   },
   "devDependencies": {
@@ -28,5 +29,6 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.0",
     "vite": "^6.3.0"
-  }
+  },
+  "license": "UNLICENSED"
 }

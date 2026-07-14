@@ -101,6 +101,10 @@ def relative(path: Path) -> str:
 def is_excluded(rel_path: str, name: str) -> bool:
     return (
         name in EXCLUDED_NAMES
+        or (
+            rel_path.startswith("demo/")
+            and not rel_path.startswith("demo/packages/exochain-wasm/")
+        )
         or rel_path.startswith(EXCLUDED_PREFIXES)
         or rel_path.endswith(EXCLUDED_SUFFIXES)
     )

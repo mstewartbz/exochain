@@ -8,7 +8,9 @@
     "@exochain/shared": "*"
   },
   "devDependencies": {
-    "vitest": "^3.0.0",
-    "supertest": "^7.0.0"
-  }
+    "supertest": "^7.0.0",
+    "vitest": "^3.0.0"
+  },
+  "private": true,
+  "license": "UNLICENSED"
 }
