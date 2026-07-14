@@ -66,20 +66,6 @@ module.exports = function(app, db, helpers) {
   } = helpers;
   const stmt = helpers.stmt || ((sql) => db.prepare(sql));
 
-function maskCredential(value) {
-  if (!value) return '****';
-  const raw = String(value);
-  if (raw.length <= 4) return '****';
-  return '****' + raw.slice(-4);
-}
-
-function maskApiKey(key) {
-  if (!key) return null;
-  const raw = String(key);
-  if (raw.length <= 8) return '••••';
-  return '••••' + raw.slice(-8);
-}
-
 function isSensitiveSettingKey(key) {
   const lower = String(key || '').toLowerCase();
   return lower === 'webhook_secret'
@@ -974,21 +960,6 @@ app.get('/api/vault/:id', (req, res, next) => {
     row.encrypted_value = maskCredential(row.encrypted_value);
     row.metadata = JSON.parse(row.metadata || '{}');
     res.json(row);
-  } catch (err) { next(err); }
-});
-
-// GET /api/vault/:id/value — returns the FULL unmasked value (for agents to use internally)
-// SECURITY: Restricted to localhost only — this endpoint must never be reachable from the network.
-app.get('/api/vault/:id/value', authRateLimiter, (req, res, next) => {
-  try {
-    const ip = req.ip || req.socket.remoteAddress || '';
-    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-    if (!isLocal) {
-      return res.status(403).json({ error: 'This endpoint is only accessible from localhost' });
-    }
-    const row = db.prepare('SELECT id, name, provider, credential_type, encrypted_value FROM credential_vault WHERE id = ?').get(req.params.id);
-    if (!row) throw notFound('Credential not found');
-    res.json({ id: row.id, name: row.name, provider: row.provider, credential_type: row.credential_type, value: row.encrypted_value });
   } catch (err) { next(err); }
 });
 

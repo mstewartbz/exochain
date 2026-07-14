@@ -78,3 +78,16 @@ test('provider update route rejects masked API key sentinels from stale clients'
     'provider update route must reject masked API key values before writing them'
   );
 });
+
+test('credential routes never return an unmasked vault value', () => {
+  assert.doesNotMatch(
+    settingsRouteSource,
+    /app\.get\('\/api\/vault\/:id\/value'/,
+    'raw credential material must remain server-internal and must not have an HTTP read route'
+  );
+  assert.doesNotMatch(
+    settingsRouteSource,
+    /value:\s*row\.encrypted_value/,
+    'credential responses must not serialize raw vault values'
+  );
+});

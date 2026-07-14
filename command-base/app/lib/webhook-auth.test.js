@@ -49,12 +49,14 @@ function requestWithSecret(secret) {
   return { headers: { 'x-webhook-secret': secret } };
 }
 
+const CONFIGURED_SECRET = 'commandbase-test-webhook-secret-32-bytes';
+
 test('missing webhook secret setting fails closed before payload handling', () => {
   const result = requireWebhookSecret({ headers: {} }, new SettingsDb(undefined, false));
 
   assert.equal(result.ok, false);
   assert.equal(result.status, 503);
-  assert.deepEqual(result.body, { error: 'Webhook secret is not configured' });
+  assert.deepEqual(result.body, { error: 'Webhook secret is not securely configured' });
 });
 
 test('empty webhook secret setting fails closed before payload handling', () => {
@@ -62,18 +64,33 @@ test('empty webhook secret setting fails closed before payload handling', () => 
 
   assert.equal(result.ok, false);
   assert.equal(result.status, 503);
-  assert.deepEqual(result.body, { error: 'Webhook secret is not configured' });
+  assert.deepEqual(result.body, { error: 'Webhook secret is not securely configured' });
+});
+
+test('short webhook secret settings and environment values fail closed', () => {
+  const result = requireWebhookSecret(requestWithSecret('short-secret'), new SettingsDb('short-secret'));
+  assert.deepEqual(
+    result,
+    { ok: false, status: 503, body: { error: 'Webhook secret is not securely configured' } },
+  );
+
+  assert.throws(
+    () => configureWebhookSecretSetting(new SettingsDb('', true), {
+      COMMANDBASE_WEBHOOK_SECRET: 'short-secret',
+    }),
+    /at least 32 bytes/,
+  );
 });
 
 test('configured webhook secret rejects missing, query, and incorrect credentials', () => {
-  const db = new SettingsDb('shared-secret');
+  const db = new SettingsDb(CONFIGURED_SECRET);
 
   assert.deepEqual(
     requireWebhookSecret({ headers: {} }, db),
     { ok: false, status: 401, body: { error: 'Unauthorized' } }
   );
   assert.deepEqual(
-    requireWebhookSecret({ headers: {}, query: { secret: 'shared-secret' } }, db),
+    requireWebhookSecret({ headers: {}, query: { secret: CONFIGURED_SECRET } }, db),
     { ok: false, status: 401, body: { error: 'Unauthorized' } }
   );
   assert.deepEqual(
@@ -83,23 +100,24 @@ test('configured webhook secret rejects missing, query, and incorrect credential
 });
 
 test('configured webhook secret accepts only the matching header value', () => {
-  const result = requireWebhookSecret(requestWithSecret('shared-secret'), new SettingsDb('shared-secret'));
+  const result = requireWebhookSecret(requestWithSecret(CONFIGURED_SECRET), new SettingsDb(CONFIGURED_SECRET));
 
   assert.deepEqual(result, { ok: true });
 });
 
 test('webhook secret bootstrap uses environment configuration without overwriting a configured secret', () => {
   const emptyDb = new SettingsDb('', true);
-  configureWebhookSecretSetting(emptyDb, { COMMANDBASE_WEBHOOK_SECRET: 'configured-secret' });
-  assert.equal(emptyDb.value, 'configured-secret');
+  configureWebhookSecretSetting(emptyDb, { COMMANDBASE_WEBHOOK_SECRET: CONFIGURED_SECRET });
+  assert.equal(emptyDb.value, CONFIGURED_SECRET);
 
   const missingDb = new SettingsDb(undefined, false);
-  configureWebhookSecretSetting(missingDb, { COMMANDBASE_WEBHOOK_SECRET: 'configured-secret' });
-  assert.equal(missingDb.value, 'configured-secret');
+  configureWebhookSecretSetting(missingDb, { COMMANDBASE_WEBHOOK_SECRET: CONFIGURED_SECRET });
+  assert.equal(missingDb.value, CONFIGURED_SECRET);
 
-  const existingDb = new SettingsDb('existing-secret', true);
-  configureWebhookSecretSetting(existingDb, { COMMANDBASE_WEBHOOK_SECRET: 'configured-secret' });
-  assert.equal(existingDb.value, 'existing-secret');
+  const existingSecret = 'commandbase-existing-webhook-secret-32-bytes';
+  const existingDb = new SettingsDb(existingSecret, true);
+  configureWebhookSecretSetting(existingDb, { COMMANDBASE_WEBHOOK_SECRET: CONFIGURED_SECRET });
+  assert.equal(existingDb.value, existingSecret);
 });
 
 test('webhook secret bootstrap permits an unset secret only as a fail-closed placeholder', () => {

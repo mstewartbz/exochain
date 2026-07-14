@@ -3,9 +3,14 @@
 const crypto = require('node:crypto');
 
 const WEBHOOK_SECRET_KEY = 'webhook_secret';
+const MIN_WEBHOOK_SECRET_BYTES = 32;
 
 function normalizeConfiguredSecret(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function hasMinimumSecretBytes(value) {
+  return Buffer.byteLength(value, 'utf8') >= MIN_WEBHOOK_SECRET_BYTES;
 }
 
 function loadWebhookSecret(db) {
@@ -38,6 +43,11 @@ function readWebhookSecretHeader(req) {
 
 function configureWebhookSecretSetting(db, env = process.env) {
   const configuredSecret = normalizeConfiguredSecret(env.COMMANDBASE_WEBHOOK_SECRET);
+  if (configuredSecret && !hasMinimumSecretBytes(configuredSecret)) {
+    throw new Error(
+      `COMMANDBASE_WEBHOOK_SECRET must be at least ${MIN_WEBHOOK_SECRET_BYTES} bytes`,
+    );
+  }
 
   db.prepare('INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)')
     .run(WEBHOOK_SECRET_KEY, configuredSecret);
@@ -53,11 +63,11 @@ function configureWebhookSecretSetting(db, env = process.env) {
 
 function requireWebhookSecret(req, db) {
   const expectedSecret = loadWebhookSecret(db);
-  if (!expectedSecret) {
+  if (!expectedSecret || !hasMinimumSecretBytes(expectedSecret)) {
     return {
       ok: false,
       status: 503,
-      body: { error: 'Webhook secret is not configured' },
+      body: { error: 'Webhook secret is not securely configured' },
     };
   }
 
@@ -74,6 +84,7 @@ function requireWebhookSecret(req, db) {
 }
 
 module.exports = {
+  MIN_WEBHOOK_SECRET_BYTES,
   configureWebhookSecretSetting,
   requireWebhookSecret,
 };

@@ -19,20 +19,25 @@ SPDX-License-Identifier: Apache-2.0
 # CommandBase EXOCHAIN Economy Adapter Intake
 
 - Owner/accountable maintainer: EXOCHAIN operator / CommandBase maintainer.
-- Deployment status: internal cockpit adapter.
+- Deployment status: `internal` cockpit adapter.
 - Constitutional trust claims: CommandBase may display EXOCHAIN-recorded HonorGood and mission-economics objects only when responses come from the configured EXOCHAIN API.
 - Core state access: read/write through `EXOCHAIN_API_BASE_URL` and optional bearer token only.
 - Trust boundary: CommandBase never computes authoritative settlements, anchors, receipts, or legal effects. It forwards operator requests to EXOCHAIN and displays EXOCHAIN responses.
-- Test command: `node --test command-base/app/lib/auth.security.test.js command-base/app/auth-bootstrap.test.js command-base/app/lib/presidential-desk.test.js`.
+- Test and CI gate: `cd command-base/app && npm ci && npm test && npm run audit:check`; from the repository root, `bash tools/test_commandbase_release_hardening.sh` is enforced by Gate 9.
 - Secrets inventory: `EXOCHAIN_API_BASE_URL`; optional `EXOCHAIN_API_TOKEN` and optional
-  `EXOCHAIN_AUTH_SECRET` (required if WASM auth backend is unavailable); optional
+  `EXOCHAIN_AUTH_SECRET` (at least 32 bytes and required if the WASM auth backend is unavailable);
+  `COMMANDBASE_WEBHOOK_SECRET` (at least 32 bytes and required before inbound SMS or Slack
+  webhooks can authenticate); optional
   `COMMAND_BASE_AUTH_BOOTSTRAP_TOKEN` for non-loopback operator auth bootstrap;
   optional `PRESIDENTIAL_SLACK_WEBHOOK_URL` and `PRESIDENTIAL_TWILIO_AUTH_TOKEN` for
   Mission C2 Chairman push (never returned by status/brief routes). Tokens
-  are not logged or returned by status routes.
+  are not logged or returned by status routes. CommandBase does not share EXOCHAIN core
+  signing keys, bootstrap credentials, tenant secrets, or emergency-override credentials.
 - Rollback/disablement: unset `EXOCHAIN_API_BASE_URL` to force HonorGood cockpit and
-  Presidential Desk actions to fail closed; unset presidential Slack/Twilio secrets
-  to disable push adapters.
+  Presidential Desk actions to fail closed; stop the CommandBase process or unmount the
+  adjacent routes to disable the surface. Unsetting `COMMANDBASE_WEBHOOK_SECRET` causes
+  inbound webhooks to fail closed; unsetting presidential Slack/Twilio secrets disables
+  push adapters.
 
 ## Presidential Desk (Mission C2) intake addendum
 

@@ -45,7 +45,7 @@ const HISTORICAL_DEV_HMAC_SECRET_SHA256 =
 const MIN_HMAC_SECRET_BYTES = 32;
 
 /** Return the explicitly configured HMAC fallback secret after policy validation. */
-function configuredHmacSecret() {
+function getHmacSecret() {
   const secret = process.env.EXOCHAIN_AUTH_SECRET;
   if (!secret) {
     throw new Error('EXOCHAIN_AUTH_SECRET is required when the WASM Ed25519 backend is unavailable');
@@ -122,7 +122,7 @@ function sign(message) {
     const sigBytes = wasm.wasm_ed25519_sign(Buffer.from(message, 'utf8'));
     return base64urlEncode(sigBytes);
   }
-  const hmac = crypto.createHmac('sha256', configuredHmacSecret());
+  const hmac = crypto.createHmac('sha256', getHmacSecret());
   hmac.update(message);
   return base64urlEncode(hmac.digest());
 }
