@@ -227,6 +227,12 @@ impl ConstitutionalMiddleware {
                 "MCP authority signer is required for verified MCP invocation context".into(),
             )
         })?;
+        if actor_did != &authority.did {
+            return Err(McpError::ConstitutionalViolation(
+                "MCP actor provenance key must be resolved independently of the configured authority signer"
+                    .into(),
+            ));
+        }
         let Some(root_link) = context.authority_chain.links.first() else {
             return Err(McpError::ConstitutionalViolation(
                 "verified MCP invocation context authority_chain is empty".into(),
@@ -262,6 +268,12 @@ impl ConstitutionalMiddleware {
                 "MCP authority signer is required for verified MCP invocation context".into(),
             )
         })?;
+        if actor_did != &authority.did {
+            return Err(McpError::ConstitutionalViolation(
+                "MCP actor provenance key must be resolved independently of the configured authority signer"
+                    .into(),
+            ));
+        }
         let public_key = authority.public_key.as_bytes().to_vec();
         let mut trusted_authority_keys = TrustedAuthorityKeys::default();
         trusted_authority_keys.insert(authority.did.clone(), vec![public_key.clone()]);
