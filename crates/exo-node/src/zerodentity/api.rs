@@ -23,8 +23,23 @@
 //! - `GET /api/v1/0dentity/:did/score/history`  — score history (owner only)
 //! - `GET /api/v1/0dentity/:did/fingerprints`   — fingerprint timeline (owner only)
 //! - `POST /api/v1/0dentity/:did/attest`        — peer attestation
+//! - `DELETE /api/v1/0dentity/:did`             — right to erasure
 //!
 //! Spec reference: §7.2, §7.3.
+//!
+//! # Auth matrix (I2) — exo-node 0dentity
+//!
+//! | Route | Method | Auth |
+//! |-------|--------|------|
+//! | `/:did/score` | GET | `verify_owner_session_blocking` (Bearer + owned session) |
+//! | `/:did/claims` | GET | `verify_owner_session_blocking` |
+//! | `/:did/score/history` | GET | `verify_owner_session_blocking` |
+//! | `/:did/fingerprints` | GET | feature gate + `verify_owner_session_blocking` |
+//! | `/:did/attest` | POST | `verify_signed_write_blocking` (Bearer + X-Exo-Nonce + X-Exo-Sig + session key) then attestation payload crypto |
+//! | `/:did` | DELETE | `verify_signed_write_blocking` |
+//!
+//! Onboarding (`claims` / `verify` / `verify/resend`) lives in `onboarding.rs` and uses
+//! the first-touch PoP gate, OTP + bootstrap binding, or challenge-bound resend.
 
 use std::{
     str::FromStr,
@@ -663,33 +678,12 @@ pub async fn list_claims(
     let did = parse_did(&did_str)?;
     let page_bounds = parse_page_bounds(params.limit, params.offset)?;
 
-    // Auth: session token required for claim listing
-    let token = extract_session_token(&headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Bearer session token required"})),
-        )
-    })?;
+    // Owner-session binding (same helper as get_score / score_history).
+    // Token must belong to `did`. Mutating routes additionally require
+    // X-Exo-Sig; this private-read path is session-bound only.
+    verify_owner_session_blocking(state.clone(), &headers, did.clone()).await?;
 
-    let now_ms = now_ms_blocking(state.clone()).await?;
     let response = with_store_blocking(state, move |store| {
-        // Verify session belongs to this DID.
-        let session = store
-            .get_session(&token, now_ms)
-            .map_err(store_error)?
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "Invalid or expired session"})),
-                )
-            })?;
-        if session.subject_did.as_str() != did.as_str() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "Access denied"})),
-            ));
-        }
-
         let all_claims = store.get_claims(&did).map_err(store_error)?;
 
         let mut total = 0usize;
@@ -787,32 +781,10 @@ pub async fn list_fingerprints(
         ));
     }
 
-    // Auth required
-    let token = extract_session_token(&headers).ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Bearer session token required"})),
-        )
-    })?;
+    // Same owner-session helper as get_score / list_claims (I2 matrix).
+    verify_owner_session_blocking(state.clone(), &headers, did.clone()).await?;
 
-    let now_ms = now_ms_blocking(state.clone()).await?;
     let response = with_store_blocking(state, move |store| {
-        let session = store
-            .get_session(&token, now_ms)
-            .map_err(store_error)?
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "Invalid or expired session"})),
-                )
-            })?;
-        if session.subject_did.as_str() != did.as_str() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "Access denied"})),
-            ));
-        }
-
         let fps = store.get_fingerprints(&did).map_err(store_error)?;
         let items: Vec<FingerprintItem> = fps
             .iter()
@@ -2332,5 +2304,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// I2 residual: claim listing and fingerprint listing must share the same
+    /// owner-session verifier as score/history — not a bespoke token branch.
+    #[test]
+    fn private_reads_use_verify_owner_session_blocking() {
+        let src = include_str!("api.rs");
+        let claims = src
+            .split("pub async fn list_claims")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn score_history").next())
+            .expect("list_claims body");
+        assert!(
+            claims.contains("verify_owner_session_blocking"),
+            "list_claims must use verify_owner_session_blocking (I2)"
+        );
+        assert!(
+            !claims.contains("extract_session_token(&headers)"),
+            "list_claims must not reimplement session extract outside the helper"
+        );
+        let fps = src
+            .split("pub async fn list_fingerprints")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn create_peer_attestation").next())
+            .expect("list_fingerprints body");
+        assert!(
+            fps.contains("verify_owner_session_blocking"),
+            "list_fingerprints must use verify_owner_session_blocking (I2)"
+        );
+    }
+
+    /// I3: signed write path still feeds create_attestation (cannot skip crypto).
+    #[test]
+    fn attest_handler_calls_create_attestation_after_signed_write() {
+        let src = include_str!("api.rs");
+        let body = src
+            .split("pub async fn create_peer_attestation")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn delete_identity").next())
+            .expect("create_peer_attestation body");
+        assert!(body.contains("verify_signed_write_blocking"));
+        assert!(body.contains("create_attestation(CreateAttestationInput"));
+        assert!(body.contains("attester_public_key must match authenticated session key"));
     }
 }
