@@ -642,6 +642,17 @@ mod tests {
     }
 
     #[test]
+    fn authority_signer_cannot_masquerade_as_a_different_actor() {
+        let k = signed_kernel();
+        let actor = did("did:exo:independent-actor");
+        let verdict = k.adjudicate(&actor, "read-medical-record");
+        assert!(
+            verdict.is_denied(),
+            "authority signing material must not be promoted as another actor's provenance key: {verdict:?}"
+        );
+    }
+
+    #[test]
     fn adjudicate_without_authority_signer_fails_closed() {
         let k = ConstitutionalKernel::new();
         let actor = did("did:exo:valid-actor");

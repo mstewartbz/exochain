@@ -573,6 +573,18 @@ mod tests {
     }
 
     #[test]
+    fn production_mcp_source_does_not_map_authority_key_to_another_actor() {
+        let source = include_str!("middleware.rs")
+            .split("// ===========================================================================\n// Tests")
+            .next()
+            .expect("production section");
+        assert!(
+            source.contains("actor_did != &authority.did"),
+            "MCP middleware must reject authority-key provenance for a different actor DID"
+        );
+    }
+
+    #[test]
     fn middleware_mcp_rules_pass_valid() {
         let mw = signed_middleware();
         let did = test_did();

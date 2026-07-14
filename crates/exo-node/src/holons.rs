@@ -1177,6 +1177,25 @@ mod tests {
     }
 
     #[test]
+    fn holon_provenance_uses_a_did_bound_actor_key_not_the_root_authority_key() {
+        let config = test_config_with_attestation();
+        let holon = create_health_holon(&config.node_did);
+        let context = build_holon_adjudication_context(&holon, &config)
+            .expect("attested Holon context should be constructed");
+        let provenance_key = context
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.public_key.as_ref())
+            .expect("Holon provenance public key");
+
+        assert_ne!(
+            provenance_key.as_slice(),
+            config.root_public_key.as_bytes(),
+            "root authority key must not masquerade as a distinct Holon actor"
+        );
+    }
+
+    #[test]
     fn production_holon_config_does_not_compile_default_authority_secret() {
         let source = include_str!("holons.rs");
         let production = source
