@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://exochain.dev/schemas/c2/daily-brief.schema.json",
+  "title": "PresidentialDailyBrief",
+  "type": "object",
+  "required": ["greeting", "generated_for", "items"],
+  "properties": {
+    "greeting": { "type": "string" },
+    "generated_for": { "type": "string", "const": "bob-stewart" },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "attention-item.schema.json" }
+    },
+    "chairman_unreachable": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}

@@ -25,6 +25,7 @@ const {
   defaultCommandBaseDbPath,
 } = require('./lib/commandbase-db-factory');
 const { mountCommandBaseUiStateRoutes } = require('./lib/commandbase-ui-state');
+const { mountPresidentialRoutes } = require('./lib/presidential-desk');
 
 // ── Structured logger — must come before any console.* calls ──
 const logger = require('./logger');
@@ -3649,6 +3650,7 @@ app.use('/api/v1', (req, res, next) => {
 });
 
 mountCommandBaseUiStateRoutes(app, db);
+mountPresidentialRoutes(app);
 
 // Static assets: type-specific Cache-Control durations via setHeaders so that
 // express.static's own header logic cannot overwrite them with max-age=0.

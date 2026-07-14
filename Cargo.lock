@@ -1826,6 +1826,7 @@ dependencies = [
  "proptest",
  "serde",
  "thiserror 2.0.17",
+ "uuid",
 ]
 
 [[package]]

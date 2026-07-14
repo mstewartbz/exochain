@@ -1,0 +1,207 @@
+<!--
+Copyright 2026 Exochain Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at:
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presidential Desk — Mission C2</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --ink: #e7eef7;
+      --muted: #8b9bb0;
+      --accent: #3d8bfd;
+      --warn: #d97706;
+      --ok: #22c55e;
+      --bad: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1b2a3d, var(--bg));
+      color: var(--ink);
+      min-height: 100vh;
+    }
+    header {
+      padding: 2rem 1.5rem 1rem;
+      border-bottom: 1px solid #243041;
+    }
+    h1 { margin: 0 0 0.35rem; font-size: 1.6rem; letter-spacing: 0.02em; }
+    .sub { color: var(--muted); max-width: 52rem; line-height: 1.45; }
+    main { padding: 1.25rem 1.5rem 3rem; display: grid; gap: 1rem; max-width: 960px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid #2a384a;
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+    }
+    .card h2 { margin: 0 0 0.6rem; font-size: 1rem; }
+    .status { font-family: ui-monospace, monospace; font-size: 0.85rem; color: var(--muted); }
+    .status.ok { color: var(--ok); }
+    .status.warn { color: var(--warn); }
+    .status.bad { color: var(--bad); }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 0.55rem 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary { background: #334155; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    ul { margin: 0.4rem 0 0; padding-left: 1.1rem; color: var(--muted); }
+    a { color: #93c5fd; }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+    .toast {
+      display: none;
+      margin-top: 0.75rem;
+      padding: 0.6rem 0.75rem;
+      border-radius: 8px;
+      background: #243041;
+      color: var(--ink);
+      font-size: 0.9rem;
+    }
+    .toast.show { display: block; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Presidential Desk</h1>
+    <p class="sub">
+      Mission C2 attention surface for Executive Chairman decisions.
+      Displays EXOCHAIN-routed brief items only when the API is configured.
+      This UI is <strong>not</strong> constitutional authority.
+    </p>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Morning greet</h2>
+      <p id="greet" class="status warn">Loading…</p>
+      <div class="actions">
+        <button type="button" id="refresh">Refresh brief</button>
+        <a href="/docs/c2/MISSION-GRAPH.md">Mission Graph</a>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Attention queue</h2>
+      <p id="queue-status" class="status">—</p>
+      <ul id="queue"></ul>
+      <div class="actions">
+        <button type="button" class="secondary" id="act-inquire" disabled>Inquire</button>
+        <button type="button" class="secondary" id="act-challenge" disabled>Challenge</button>
+        <button type="button" id="act-ratify" disabled>Ratify</button>
+        <button type="button" class="secondary" id="act-veto" disabled>Veto</button>
+      </div>
+      <div id="toast" class="toast" role="status"></div>
+    </section>
+    <section class="card">
+      <h2>Blocker push status</h2>
+      <p id="push-status" class="status">—</p>
+      <ul>
+        <li>Primary: Slack webhook</li>
+        <li>Secondary: SMS (Twilio)</li>
+        <li>Ratify/veto never via emoji — signed desk / dual gate when irreversible</li>
+      </ul>
+    </section>
+  </main>
+  <script>
+    const greet = document.getElementById('greet');
+    const queue = document.getElementById('queue');
+    const queueStatus = document.getElementById('queue-status');
+    const pushStatus = document.getElementById('push-status');
+    const toast = document.getElementById('toast');
+    const buttons = ['act-inquire', 'act-challenge', 'act-ratify', 'act-veto'].map(id => document.getElementById(id));
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+    }
+
+    async function loadBrief() {
+      greet.textContent = 'Loading…';
+      greet.className = 'status warn';
+      try {
+        const res = await fetch('/api/presidential/brief');
+        const data = await res.json();
+        if (!res.ok || data.configured === false) {
+          greet.textContent = data.greeting || 'Presidential Desk unconfigured — fail closed.';
+          greet.className = 'status warn';
+          queueStatus.textContent = data.reason || 'EXOCHAIN API / brief source not configured';
+          queue.innerHTML = '';
+          pushStatus.textContent = data.push_status || 'Push adapters disabled until secrets configured';
+          buttons.forEach(b => { b.disabled = true; });
+          return;
+        }
+        greet.textContent = data.greeting || 'Good morning.';
+        greet.className = 'status ok';
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (items.length === 0) {
+          queueStatus.textContent = 'No presidential decisions today.';
+          queue.innerHTML = '';
+          buttons.forEach(b => { b.disabled = true; });
+        } else {
+          queueStatus.textContent = items.length + ' item(s) requiring attention';
+          queue.innerHTML = items.map(item => {
+            const id = item.decision_id || 'unknown';
+            const node = item.mission_node_id || '—';
+            const dual = item.requires_two_person_gate ? ' (dual-gate)' : '';
+            return '<li><strong>' + id + '</strong> · node ' + node + dual + '</li>';
+          }).join('');
+          buttons.forEach(b => { b.disabled = false; });
+        }
+        pushStatus.textContent = data.push_status || 'No active blocker push';
+        if (data.chairman_unreachable) {
+          pushStatus.className = 'status bad';
+          pushStatus.textContent = 'chairman_unreachable — both push channels failed';
+        }
+      } catch (err) {
+        greet.textContent = 'Brief fetch failed — fail closed.';
+        greet.className = 'status bad';
+        queueStatus.textContent = String(err);
+        buttons.forEach(b => { b.disabled = true; });
+      }
+    }
+
+    async function act(action) {
+      try {
+        const res = await fetch('/api/presidential/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        const data = await res.json();
+        showToast(data.message || (res.ok ? 'Recorded' : 'Rejected'));
+      } catch (err) {
+        showToast(String(err));
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', loadBrief);
+    document.getElementById('act-inquire').addEventListener('click', () => act('inquire'));
+    document.getElementById('act-challenge').addEventListener('click', () => act('challenge'));
+    document.getElementById('act-ratify').addEventListener('click', () => act('ratify'));
+    document.getElementById('act-veto').addEventListener('click', () => act('veto'));
+    loadBrief();
+  </script>
+</body>
+</html>

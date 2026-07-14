@@ -1,0 +1,110 @@
+# Copyright 2026 Exochain Foundation
+# SPDX-License-Identifier: Apache-2.0
+# Mission Graph machine registry — status is by reference to GAP-REGISTRY only.
+
+schema_version: 1
+topology: railway-github
+two_person_gate:
+  bob_github: bob-stewart
+  max_github: mstewartbz
+nodes:
+  - id: constitutional-core
+    title: Constitutional core
+    parent: null
+    why: "Protect kernel invariants, combinator algebra, and gatekeeper adjudication."
+    depends_on: []
+    gap_refs: [VCG-010]
+    how_owners: [exo-gatekeeper, agents/governance-constitutional-engineer]
+    progress_sources: [GAP-REGISTRY.md, governance/traceability_matrix.md]
+    kill_criteria: "Invariant bypass or KernelImmutability violation in production path"
+    steer_prompt_path: nodes/constitutional-core.md
+  - id: proof-verification
+    title: Proof and verification
+    parent: null
+    why: "Make CGR/ZK proof claims wire-true and auditable."
+    depends_on: [constitutional-core]
+    gap_refs: [VCG-001, VCG-004]
+    how_owners: [exo-proofs, W1, W3]
+    progress_sources: [GAP-REGISTRY.md, docs/governance/RATIFICATION-SLATE-2026-07-04.md]
+    kill_criteria: "Proof claim without verified backend or failing Stage objective"
+    steer_prompt_path: nodes/proof-verification.md
+  - id: runtime-wiring
+    title: Runtime wiring
+    parent: null
+    why: "Authenticated node/gateway/MCP mutation authority with fail-closed bridges."
+    depends_on: [constitutional-core]
+    gap_refs: [VCG-004, VCG-005, VCG-015]
+    how_owners: [exo-node, exo-gateway, W2]
+    progress_sources: [INTEGRATION.md, GAP-REGISTRY.md]
+    kill_criteria: "Unauthenticated write path or simulated consent outside core"
+    steer_prompt_path: nodes/runtime-wiring.md
+  - id: identity-0dentity
+    title: Identity and 0dentity
+    parent: null
+    why: "First-touch identity and device/behavior axes remain governed."
+    depends_on: [constitutional-core]
+    gap_refs: [VCG-008, VCG-009]
+    how_owners: [exo-identity]
+    progress_sources: [GAP-REGISTRY.md]
+    kill_criteria: "Identity mint without provenance or bailment consent"
+    steer_prompt_path: nodes/identity-0dentity.md
+  - id: avc-root-trust
+    title: AVC and root trust
+    parent: null
+    why: "AVC emit/readback and root trust anchors stay production-true."
+    depends_on: [constitutional-core, identity-0dentity]
+    gap_refs: [VCG-006]
+    how_owners: [exo-avc, CR-003, CR-004]
+    progress_sources: [docs/avc/README.md, docs/proof/avc-cornerstone-production-proof.md]
+    kill_criteria: "Trust claim without AVC/readback evidence"
+    steer_prompt_path: nodes/avc-root-trust.md
+  - id: dagdb-memory
+    title: DAG DB governed memory
+    parent: null
+    why: "Graph-governed memory runtime with fail-closed REST/MCP."
+    depends_on: [constitutional-core, runtime-wiring]
+    gap_refs: []
+    how_owners: [exo-dag-db-*, exo-gateway]
+    progress_sources: [INTEGRATION.md, docs/dagdb/runtime-activation/rollback-canary-observability.md]
+    kill_criteria: "Mounted route without pool/authority/signature fail-closed"
+    steer_prompt_path: nodes/dagdb-memory.md
+  - id: tee-attestation
+    title: TEE and hardware attestation
+    parent: null
+    why: "Hardware attestation consumer path remains pending-activation honest."
+    depends_on: [constitutional-core]
+    gap_refs: [VCG-011]
+    how_owners: [W5, exo-gatekeeper/tee]
+    progress_sources: [GAP-REGISTRY.md, docs/governance/RATIFICATION-SLATE-2026-07-04.md]
+    kill_criteria: "TEE production claim without O-11 green objectives"
+    steer_prompt_path: nodes/tee-attestation.md
+  - id: economy-honorgood
+    title: Economy and HonorGood
+    parent: null
+    why: "Mission economics and settlement authority stay in EXOCHAIN core."
+    depends_on: [constitutional-core, avc-root-trust]
+    gap_refs: []
+    how_owners: [exo-economy, docs/economy]
+    progress_sources: [docs/economy/MISSION_ECONOMICS.md, docs/honorgood/HONOR_GOOD_COMPACT.md]
+    kill_criteria: "Adjacent surface computing settlement as authority"
+    steer_prompt_path: nodes/economy-honorgood.md
+  - id: platform-release
+    title: Platform and release
+    parent: null
+    why: "CI gates, semver, Railway deploy evidence remain truthful."
+    depends_on: [runtime-wiring]
+    gap_refs: []
+    how_owners: [CI, VERSIONING, railway]
+    progress_sources: [CHANGELOG.md, VERSIONING.md, tools/repo_truth.sh]
+    kill_criteria: "Release claim without green gates or SHA-bound deploy"
+    steer_prompt_path: nodes/platform-release.md
+  - id: adjacent-surfaces
+    title: Adjacent surfaces
+    parent: null
+    why: "CommandBase, LiveSafe, CyberMedica, HeartField stay intake-gated and fail-closed."
+    depends_on: [runtime-wiring, avc-root-trust]
+    gap_refs: []
+    how_owners: [command-base, livesafe, cybermedica]
+    progress_sources: [command-base/EXOCHAIN_SURFACE_INTAKE.md, livesafe/docs/context]
+    kill_criteria: "Constitutional trust claim without tested core adapter path"
+    steer_prompt_path: nodes/adjacent-surfaces.md

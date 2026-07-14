@@ -153,6 +153,8 @@ SPDX-License-Identifier: Apache-2.0
 - [[CR-001-AEGIS-SYBIL-AUTHENTIC-PLURALITY]] — Council Resolution defining AEGIS and SYBIL.
 - [[COUNCIL-ASSESSMENT-EXO-VS-EXOCHAIN]] — 5-panel assessment driving the refactor.
 - [[EXOCHAIN-REFACTOR-PLAN]] — Master plan: council -> Syntaxis -> assimilation.
+- [Mission C2 — Presidential Attention](c2/README.md) — WHY/HOW Mission Graph, daily brief, AI-IRB cohort, Chairman escalation (Railway + GitHub).
+- [Mission C2 Progress (by reference)](c2/PROGRESS.md) — rollup pointers into GAP-REGISTRY and integration SSOTs.
 
 ## Council reports
 
