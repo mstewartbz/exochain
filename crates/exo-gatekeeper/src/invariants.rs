@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     AuthorityChain, AuthorityLink, BailmentState, ConsentRecord, GovernmentBranch,
-    IndependenceClaim, PermissionSet, Provenance, QuorumEvidence, QuorumVote, ReviewOrder, Role,
-    TrustedAuthorityKeys, TrustedProvenanceKeys, VoiceKind,
+    IndependenceClaim, MAX_AUTHORITY_CHAIN_LINKS, PermissionSet, Provenance, QuorumEvidence,
+    QuorumVote, ReviewOrder, Role, TrustedAuthorityKeys, TrustedProvenanceKeys, VoiceKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -563,6 +563,15 @@ fn check_authority_chain_valid(ctx: &InvariantContext) -> Result<(), InvariantVi
             invariant: ConstitutionalInvariant::AuthorityChainValid,
             description: "Authority chain is empty — no delegation path".into(),
             evidence: vec!["authority_chain: empty".into()],
+        });
+    }
+    if ctx.authority_chain.depth() > MAX_AUTHORITY_CHAIN_LINKS {
+        return Err(InvariantViolation {
+            invariant: ConstitutionalInvariant::AuthorityChainValid,
+            description: format!(
+                "Authority chain may contain at most five signed links ({MAX_AUTHORITY_CHAIN_LINKS})"
+            ),
+            evidence: vec![format!("depth: {}", ctx.authority_chain.depth())],
         });
     }
     let links = &ctx.authority_chain.links;
@@ -2554,6 +2563,43 @@ mod tests {
                 && err[0].description.contains("unresolved"),
             "self-attested grantor public keys must not satisfy AuthorityChainValid: {err:?}"
         );
+    }
+
+    #[test]
+    fn authority_chain_rejects_more_than_five_signed_links_in_core() {
+        let engine = InvariantEngine::new(InvariantSet::with(vec![
+            ConstitutionalInvariant::AuthorityChainValid,
+        ]));
+        let mut ctx = passing_context();
+        let canonical_max_links = MAX_AUTHORITY_CHAIN_LINKS;
+        let mut links = Vec::new();
+        ctx.trusted_authority_keys = TrustedAuthorityKeys::default();
+
+        for idx in 0..=canonical_max_links {
+            let grantor = if idx == 0 {
+                "did:exo:root".to_owned()
+            } else {
+                format!("did:exo:delegate-{idx}")
+            };
+            let grantee = if idx == canonical_max_links {
+                ctx.actor.to_string()
+            } else {
+                format!("did:exo:delegate-{}", idx + 1)
+            };
+            let (link, public_key) = signed_link(&grantor, &grantee);
+            ctx.trusted_authority_keys
+                .insert(link.grantor.clone(), vec![public_key.as_bytes().to_vec()]);
+            links.push(link);
+        }
+        ctx.authority_chain = AuthorityChain { links };
+
+        let violations = enforce_all(&engine, &ctx)
+            .expect_err("gatekeeper core must reject an over-depth signed authority chain");
+        assert_eq!(
+            violations[0].invariant,
+            ConstitutionalInvariant::AuthorityChainValid
+        );
+        assert!(violations[0].description.contains("at most five"));
     }
 
     #[test]

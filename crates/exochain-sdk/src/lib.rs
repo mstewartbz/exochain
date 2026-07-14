@@ -104,7 +104,7 @@
 //! // 5. Ask the kernel whether bob may perform the action.
 //! // The SDK kernel requires caller-supplied authority signing material.
 //! let kernel = ConstitutionalKernel::with_authority_identity(root);
-//! let verdict = kernel.adjudicate(bob.did(), "data:medical:read");
+//! let verdict = kernel.adjudicate_as(&bob, "data:medical:read");
 //! assert!(verdict.is_permitted(), "expected Permitted, got {verdict:?}");
 //! # Ok::<(), exochain_sdk::error::ExoError>(())
 //! ```

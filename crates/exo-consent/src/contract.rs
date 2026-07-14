@@ -34,6 +34,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{bailment::BailmentType, error::ConsentError};
 
+/// The canonical accounting policy bound into commercial licensure contracts.
+pub const LICENSURE_USAGE_ACCOUNTING_POLICY: &str = "exo-economy-use-event-v1";
+
+const LICENSURE_REQUIRED_PARAMS: [&str; 5] = [
+    "licensed_product",
+    "licensed_scope",
+    "commercial_terms_hash",
+    "usage_accounting_policy",
+    "settlement_ruleset_id",
+];
+
 // ---------------------------------------------------------------------------
 // Core Types
 // ---------------------------------------------------------------------------
@@ -370,6 +381,11 @@ pub fn default_template(bailment_type: BailmentType) -> ContractTemplate {
             "Standard Delegation Agreement",
             delegation_clauses(),
         ),
+        BailmentType::Licensure => (
+            "licensure-standard-v1",
+            "Standard Commercial Licensure Agreement",
+            licensure_clauses(),
+        ),
         BailmentType::Emergency => (
             "emergency-standard-v1",
             "Emergency Access Agreement",
@@ -404,6 +420,7 @@ pub fn compose(
 ) -> Result<ComposedContract, ConsentError> {
     let id = id.into();
     validate_constructor_metadata("contract id", &id, "composed_at", &composed_at)?;
+    validate_template_params(template.bailment_type, params)?;
 
     // Filter clauses by jurisdiction
     let mut filtered_clauses = Vec::new();
@@ -427,6 +444,7 @@ pub fn compose(
     let mut rendered_clauses = Vec::with_capacity(filtered_clauses.len());
     for (i, clause) in filtered_clauses.iter().enumerate() {
         let rendered_body = substitute_params(&clause.body, params);
+        reject_unresolved_placeholder(&clause.id, &rendered_body)?;
         rendered_clauses.push(RenderedClause {
             clause_id: clause.id.clone(),
             category: clause.category,
@@ -590,6 +608,9 @@ pub fn amend(
 ) -> Result<ComposedContract, ConsentError> {
     let id = id.into();
     validate_constructor_metadata("contract id", &id, "composed_at", &composed_at)?;
+    if original.template_id == "licensure-standard-v1" {
+        validate_licensure_params(new_params)?;
+    }
 
     // Start with original rendered clauses
     let mut clauses: Vec<RenderedClause> = original.rendered_clauses.clone();
@@ -601,14 +622,17 @@ pub fn amend(
             rc.category = new_clause.category;
             rc.title = new_clause.title.clone();
             rc.rendered_body = substitute_params(&new_clause.body, new_params);
+            reject_unresolved_placeholder(&new_clause.id, &rc.rendered_body)?;
         } else {
             // New clause — append
             let section = format!("{}", clauses.len() + 1);
+            let rendered_body = substitute_params(&new_clause.body, new_params);
+            reject_unresolved_placeholder(&new_clause.id, &rendered_body)?;
             clauses.push(RenderedClause {
                 clause_id: new_clause.id.clone(),
                 category: new_clause.category,
                 title: new_clause.title.clone(),
-                rendered_body: substitute_params(&new_clause.body, new_params),
+                rendered_body,
                 section_number: section,
             });
         }
@@ -742,6 +766,79 @@ fn substitute_params(body: &str, params: &ContractParams) -> String {
     }
 
     result
+}
+
+fn validate_template_params(
+    bailment_type: BailmentType,
+    params: &ContractParams,
+) -> Result<(), ConsentError> {
+    if bailment_type == BailmentType::Licensure {
+        validate_licensure_params(params)?;
+    }
+    Ok(())
+}
+
+fn validate_licensure_params(params: &ContractParams) -> Result<(), ConsentError> {
+    for key in LICENSURE_REQUIRED_PARAMS {
+        let value = params.custom_params.get(&key.to_string()).ok_or_else(|| {
+            ConsentError::Denied(format!(
+                "commercial licensure requires custom parameter '{key}'"
+            ))
+        })?;
+        if value.trim().is_empty() {
+            return Err(ConsentError::Denied(format!(
+                "commercial licensure parameter '{key}' must not be empty"
+            )));
+        }
+    }
+
+    for key in ["commercial_terms_hash", "settlement_ruleset_id"] {
+        let value = params.custom_params.get(&key.to_string()).ok_or_else(|| {
+            ConsentError::Denied(format!(
+                "commercial licensure requires custom parameter '{key}'"
+            ))
+        })?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ConsentError::Denied(format!(
+                "commercial licensure parameter '{key}' must be a 64-character lowercase hexadecimal hash"
+            )));
+        }
+    }
+
+    let accounting_policy = params
+        .custom_params
+        .get(&"usage_accounting_policy".to_string())
+        .ok_or_else(|| {
+            ConsentError::Denied(
+                "commercial licensure requires custom parameter 'usage_accounting_policy'"
+                    .to_string(),
+            )
+        })?;
+    if accounting_policy != LICENSURE_USAGE_ACCOUNTING_POLICY {
+        return Err(ConsentError::Denied(format!(
+            "commercial licensure usage_accounting_policy must be '{LICENSURE_USAGE_ACCOUNTING_POLICY}'"
+        )));
+    }
+
+    Ok(())
+}
+
+fn reject_unresolved_placeholder(clause_id: &str, rendered_body: &str) -> Result<(), ConsentError> {
+    let Some(start) = rendered_body.find("{{") else {
+        return Ok(());
+    };
+    let unresolved = rendered_body[start + 2..]
+        .find("}}")
+        .map_or(&rendered_body[start + 2..], |end| {
+            &rendered_body[start + 2..start + 2 + end]
+        });
+    Err(ConsentError::Denied(format!(
+        "contract clause '{clause_id}' retained unresolved placeholder '{unresolved}'"
+    )))
 }
 
 /// Generate standard clauses for Custody bailment type.
@@ -1024,6 +1121,76 @@ fn emergency_clauses() -> Vec<Clause> {
     ]
 }
 
+/// Generate standard clauses for commercial Licensure bailments.
+fn licensure_clauses() -> Vec<Clause> {
+    vec![
+        Clause {
+            id: "licensure-data-custody".to_string(),
+            category: ClauseCategory::DataCustody,
+            title: "Licensed Data Custody".to_string(),
+            body: "{{bailee_name}} may hold {{bailor_name}} data only for {{licensed_product}} within {{licensed_scope}}. Data classification: {{data_classification}}. {{classification_custody_obligations}}".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-processing-rights".to_string(),
+            category: ClauseCategory::ProcessingRights,
+            title: "Commercial Use Rights".to_string(),
+            body: "The commercial right to use {{licensed_product}} is limited to {{licensed_scope}} under terms hash {{commercial_terms_hash}}. Each governed use must be recorded under {{usage_accounting_policy}}. {{classification_processing_obligations}}".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-breach-remedies".to_string(),
+            category: ClauseCategory::BreachRemedies,
+            title: "Commercial Breach Remedies".to_string(),
+            body: "Unlicensed, unaccounted, or out-of-scope use of {{licensed_product}} is a material breach. {{classification_breach_notice}} Access must fail closed until the breach is cured.".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-liability-caps".to_string(),
+            category: ClauseCategory::LiabilityCaps,
+            title: "Liability Caps".to_string(),
+            body: "Total liability is capped at {{liability_cap_bps}} basis points of assessed value, subject to the signed commercial terms hash {{commercial_terms_hash}}. {{classification_liability_obligations}}".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-dispute-resolution".to_string(),
+            category: ClauseCategory::DisputeResolution,
+            title: "Commercial Dispute Resolution".to_string(),
+            body: "Disputes concerning {{licensed_product}}, recorded use, or settlement ruleset {{settlement_ruleset_id}} are resolved under jurisdiction {{jurisdiction}}.".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-termination".to_string(),
+            category: ClauseCategory::Termination,
+            title: "Termination and Revocation".to_string(),
+            body: "Licensure of {{licensed_product}} terminates at {{expiry_date}} or earlier revocation. Use and usage accounting must cease only after the final governed use is recorded. {{classification_termination_obligations}}".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-jurisdiction".to_string(),
+            category: ClauseCategory::Jurisdiction,
+            title: "Governing Jurisdiction".to_string(),
+            body: "The commercial licensure identified by {{commercial_terms_hash}} is governed by {{jurisdiction}}.".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+        Clause {
+            id: "licensure-indemnification".to_string(),
+            category: ClauseCategory::Indemnification,
+            title: "Commercial Indemnification".to_string(),
+            body: "{{bailee_name}} shall indemnify {{bailor_name}} for unauthorized use of {{licensed_product}}, missing records under {{usage_accounting_policy}}, or settlement outside ruleset {{settlement_ruleset_id}}.".to_string(),
+            required: true,
+            jurisdiction: None,
+        },
+    ]
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1060,6 +1227,28 @@ mod tests {
     fn test_params_with_classification(data_classification: DataClassification) -> ContractParams {
         let mut params = test_params();
         params.data_classification = data_classification;
+        params
+    }
+
+    fn licensure_params() -> ContractParams {
+        let mut params = test_params();
+        params
+            .custom_params
+            .insert("licensed_product".to_string(), "CyberMedica".to_string());
+        params.custom_params.insert(
+            "licensed_scope".to_string(),
+            "production clinical workflow use".to_string(),
+        );
+        params
+            .custom_params
+            .insert("commercial_terms_hash".to_string(), "11".repeat(32));
+        params.custom_params.insert(
+            "usage_accounting_policy".to_string(),
+            "exo-economy-use-event-v1".to_string(),
+        );
+        params
+            .custom_params
+            .insert("settlement_ruleset_id".to_string(), "22".repeat(32));
         params
     }
 
@@ -1436,6 +1625,7 @@ mod tests {
             BailmentType::Custody,
             BailmentType::Processing,
             BailmentType::Delegation,
+            BailmentType::Licensure,
             BailmentType::Emergency,
         ] {
             let template = default_template(bailment_type);
@@ -1750,6 +1940,125 @@ mod tests {
         // Must cover Termination clauses — emergencies expire fast.
         let cats: Vec<ClauseCategory> = template.clauses.iter().map(|c| c.category).collect();
         assert!(cats.contains(&ClauseCategory::Termination));
+    }
+
+    #[test]
+    fn licensure_template_requires_commercial_terms_and_all_clause_categories() {
+        let template = default_template(BailmentType::Licensure);
+        assert_eq!(template.bailment_type, BailmentType::Licensure);
+        assert_eq!(template.id, "licensure-standard-v1");
+        assert_eq!(template.name, "Standard Commercial Licensure Agreement");
+        assert_eq!(template.clauses.len(), 8);
+        assert!(template.clauses.iter().all(|clause| clause.required));
+
+        let categories = template
+            .clauses
+            .iter()
+            .map(|clause| clause.category)
+            .collect::<Vec<_>>();
+        for category in all_categories() {
+            assert!(
+                categories.contains(&category),
+                "Licensure template missing category: {category:?}"
+            );
+        }
+
+        let body = template
+            .clauses
+            .iter()
+            .map(|clause| clause.body.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required_placeholder in [
+            "{{licensed_product}}",
+            "{{licensed_scope}}",
+            "{{commercial_terms_hash}}",
+            "{{usage_accounting_policy}}",
+            "{{settlement_ruleset_id}}",
+        ] {
+            assert!(
+                body.contains(required_placeholder),
+                "Licensure template missing {required_placeholder}"
+            );
+        }
+    }
+
+    #[test]
+    fn licensure_composition_fails_closed_without_complete_commercial_terms() {
+        let template = default_template(BailmentType::Licensure);
+        let mut params = licensure_params();
+        params
+            .custom_params
+            .remove(&"usage_accounting_policy".to_string());
+        let missing = compose(&template, &params, "license-1", ts(1_700_000_000_100));
+        assert!(
+            matches!(missing, Err(ConsentError::Denied(reason)) if reason.contains("usage_accounting_policy"))
+        );
+
+        let mut params = licensure_params();
+        params
+            .custom_params
+            .insert("licensed_scope".to_string(), "   ".to_string());
+        let empty = compose(&template, &params, "license-2", ts(1_700_000_000_100));
+        assert!(
+            matches!(empty, Err(ConsentError::Denied(reason)) if reason.contains("licensed_scope"))
+        );
+    }
+
+    #[test]
+    fn licensure_composition_resolves_every_commercial_placeholder() {
+        let template = default_template(BailmentType::Licensure);
+        let contract = compose_test(&template, &licensure_params());
+        let body = rendered_contract_body(&contract);
+
+        assert!(body.contains("CyberMedica"));
+        assert!(body.contains("exo-economy-use-event-v1"));
+        assert!(
+            !body.contains("{{"),
+            "contract retained an unresolved placeholder"
+        );
+    }
+
+    #[test]
+    fn licensure_composition_rejects_unrecognized_accounting_and_malformed_hashes() {
+        let template = default_template(BailmentType::Licensure);
+
+        let mut params = licensure_params();
+        params.custom_params.insert(
+            "usage_accounting_policy".to_string(),
+            "external-meter".to_string(),
+        );
+        let wrong_meter = compose(&template, &params, "license-3", ts(1_700_000_000_100));
+        assert!(
+            matches!(wrong_meter, Err(ConsentError::Denied(reason)) if reason.contains(LICENSURE_USAGE_ACCOUNTING_POLICY))
+        );
+
+        for (key, invalid_value) in [
+            ("commercial_terms_hash", "11".repeat(31)),
+            ("settlement_ruleset_id", "GG".repeat(32)),
+        ] {
+            let mut params = licensure_params();
+            params.custom_params.insert(key.to_string(), invalid_value);
+            let result = compose(&template, &params, "license-4", ts(1_700_000_000_100));
+            assert!(matches!(result, Err(ConsentError::Denied(reason)) if reason.contains(key)));
+        }
+    }
+
+    #[test]
+    fn composition_rejects_unresolved_placeholders() {
+        let mut template = default_template(BailmentType::Custody);
+        template.clauses[0]
+            .body
+            .push_str(" {{unknown_required_value}}");
+        let result = compose(
+            &template,
+            &test_params(),
+            "contract-1",
+            ts(1_700_000_000_100),
+        );
+        assert!(
+            matches!(result, Err(ConsentError::Denied(reason)) if reason.contains("unknown_required_value"))
+        );
     }
 
     // -- Test 19: compose with a Delegation template composes + hashes --
