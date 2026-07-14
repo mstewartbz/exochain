@@ -16,13 +16,13 @@ limitations under the License.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# CommandBase EXOCHAIN Economy Adapter Intake
+# CommandBase EXOCHAIN Adjacent Surface Intake
 
 - Owner/accountable maintainer: EXOCHAIN operator / CommandBase maintainer.
 - Deployment status: `internal` cockpit adapter.
-- Constitutional trust claims: CommandBase may display EXOCHAIN-recorded HonorGood and mission-economics objects only when responses come from the configured EXOCHAIN API.
+- Constitutional trust claims: CommandBase may display EXOCHAIN-recorded HonorGood and mission-economics objects only when responses come from the configured EXOCHAIN API. CommandBase-local governance receipts, review-panel votes, and heuristic invariant checks are adjacent audit records and are not EXOCHAIN constitutional-kernel enforcement.
 - Core state access: read/write through `EXOCHAIN_API_BASE_URL` and optional bearer token only.
-- Trust boundary: CommandBase never computes authoritative settlements, anchors, receipts, or legal effects. It forwards operator requests to EXOCHAIN and displays EXOCHAIN responses.
+- Trust boundary: CommandBase never computes authoritative settlements, anchors, EXOCHAIN receipts, governance outcomes, consent decisions, authority chains, or legal effects. It forwards operator requests to EXOCHAIN and displays EXOCHAIN responses. CommandBase-local heuristic checks may write local audit-trail records, but they never extend a trusted EXOCHAIN receipt hash chain.
 - Test and CI gate: `cd command-base/app && npm ci && npm test && npm run audit:check`; from the repository root, `bash tools/test_commandbase_release_hardening.sh` is enforced by Gate 9.
 - Secrets inventory: `EXOCHAIN_API_BASE_URL`; optional `EXOCHAIN_API_TOKEN` and optional
   `EXOCHAIN_AUTH_SECRET` (at least 32 bytes and required if the WASM auth backend is unavailable);
@@ -37,7 +37,8 @@ SPDX-License-Identifier: Apache-2.0
   Presidential Desk actions to fail closed; stop the CommandBase process or unmount the
   adjacent routes to disable the surface. Unsetting `COMMANDBASE_WEBHOOK_SECRET` causes
   inbound webhooks to fail closed; unsetting presidential Slack/Twilio secrets disables
-  push adapters.
+  push adapters. Disable CommandBase governance automation routes if local audit records
+  are ever mistaken for EXOCHAIN core receipts.
 
 ## Presidential Desk (Mission C2) intake addendum
 
