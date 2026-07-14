@@ -1837,6 +1837,68 @@ mod tests {
     }
 
     #[test]
+    fn graphql_app_state_uses_reader_writer_lock_not_single_mutex() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+
+        assert!(
+            production.contains("type SharedGraphqlState = Arc<AsyncRwLock<AppState>>"),
+            "GraphQL AppState must use a reader/writer lock so independent queries do not serialize behind one mutex"
+        );
+        assert!(
+            !production.contains("Arc<Mutex<AppState>>"),
+            "GraphQL AppState must not expose a single shared Tokio mutex"
+        );
+        assert!(
+            !production.contains(".lock().await"),
+            "GraphQL resolvers must acquire read/write guards explicitly instead of serializing every operation through lock().await"
+        );
+    }
+
+    #[test]
+    fn graphql_decisions_query_uses_tenant_indexes_before_pagination() {
+        let production = include_str!("graphql.rs")
+            .split("// ---------------------------------------------------------------------------\n// Tests")
+            .next()
+            .expect("production section");
+        let app_state = production
+            .split("pub struct AppState")
+            .nth(1)
+            .expect("AppState section")
+            .split("impl Default for AppState")
+            .next()
+            .expect("AppState section end");
+        let decisions_resolver = production
+            .split("async fn decisions")
+            .nth(1)
+            .expect("decisions resolver")
+            .split("    /// Get the delegated authority chain")
+            .next()
+            .expect("decisions resolver end");
+
+        assert!(
+            app_state.contains("decision_ids_by_tenant: BTreeMap<String, BTreeSet<String>>"),
+            "GraphQL AppState must keep a tenant decision index"
+        );
+        assert!(
+            app_state.contains(
+                "decision_ids_by_tenant_status: BTreeMap<(String, String), BTreeSet<String>>"
+            ),
+            "GraphQL AppState must keep a tenant+status decision index"
+        );
+        assert!(
+            decisions_resolver.contains("decision_ids_for_query"),
+            "decisions resolver must fetch candidate IDs from indexes before pagination"
+        );
+        assert!(
+            !decisions_resolver.contains(".decisions\n            .values()"),
+            "decisions resolver must not scan all in-memory decision records per request"
+        );
+    }
+
+    #[test]
     fn graphql_feature_on_resolvers_use_deterministic_ids_and_structured_hashes() {
         let production = include_str!("graphql.rs")
             .split("// ---------------------------------------------------------------------------\n// Tests")
