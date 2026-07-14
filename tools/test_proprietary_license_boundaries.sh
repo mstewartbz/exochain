@@ -60,11 +60,9 @@ grep -F '"cybermedica/",' tools/license_headers.py >/dev/null \
 
 grep -F 'Apache-2.0 for EXOCHAIN core' README.md >/dev/null \
   || fail 'README must scope Apache-2.0 to EXOCHAIN core'
-grep -F '`livesafe/` and `cybermedica/`' README.md >/dev/null \
-  || fail 'README must identify both proprietary subtrees'
-grep -F '`livesafe/LICENSE`' README.md >/dev/null \
+grep -F '[livesafe/LICENSE](livesafe/LICENSE)' README.md >/dev/null \
   || fail 'README must cite the LiveSafe license'
-grep -F '`cybermedica/LICENSE`' README.md >/dev/null \
+grep -F '[cybermedica/LICENSE](cybermedica/LICENSE)' README.md >/dev/null \
   || fail 'README must cite the CyberMedica license'
 
 registry='governance/commercial-product-licensing.json'

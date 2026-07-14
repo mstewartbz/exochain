@@ -1,0 +1,59 @@
+{
+  "core_license": "Apache-2.0",
+  "effective_date": "2026-07-14",
+  "licensure_template": "licensure-standard-v1",
+  "products": [
+    {
+      "apache_by_proximity": false,
+      "apache_core_primitive": "crates/decision-forum",
+      "bailment_type": "Licensure",
+      "license_model": "commercial",
+      "name": "Decision Forum",
+      "product_boundary": "external proprietary product",
+      "settlement_required": true,
+      "usage_accounting_policy": "exo-economy-use-event-v1"
+    },
+    {
+      "apache_by_proximity": false,
+      "apache_core_primitive": null,
+      "bailment_type": "Licensure",
+      "license_model": "commercial",
+      "name": "LegalDyne",
+      "product_boundary": "external proprietary product",
+      "settlement_required": true,
+      "usage_accounting_policy": "exo-economy-use-event-v1"
+    },
+    {
+      "apache_by_proximity": false,
+      "apache_core_primitive": null,
+      "bailment_type": "Licensure",
+      "license_model": "commercial",
+      "name": "CyberMedica",
+      "product_boundary": "cybermedica/ proprietary adjacent subtree",
+      "settlement_required": true,
+      "usage_accounting_policy": "exo-economy-use-event-v1"
+    },
+    {
+      "apache_by_proximity": false,
+      "apache_core_primitive": null,
+      "bailment_type": "Licensure",
+      "license_model": "commercial",
+      "name": "LiveSafe",
+      "product_boundary": "livesafe/ proprietary adjacent subtree",
+      "settlement_required": true,
+      "usage_accounting_policy": "exo-economy-use-event-v1"
+    },
+    {
+      "apache_by_proximity": false,
+      "apache_core_primitive": null,
+      "bailment_type": "Licensure",
+      "license_model": "commercial",
+      "name": "CrossChecked",
+      "product_boundary": "external proprietary product",
+      "settlement_required": true,
+      "usage_accounting_policy": "exo-economy-use-event-v1"
+    }
+  ],
+  "schema_version": 1,
+  "usage_accounting_policy": "exo-economy-use-event-v1"
+}
