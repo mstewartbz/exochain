@@ -1063,6 +1063,28 @@ mod tests {
         params
     }
 
+    fn licensure_params() -> ContractParams {
+        let mut params = test_params();
+        params
+            .custom_params
+            .insert("licensed_product".to_string(), "CyberMedica".to_string());
+        params.custom_params.insert(
+            "licensed_scope".to_string(),
+            "production clinical workflow use".to_string(),
+        );
+        params
+            .custom_params
+            .insert("commercial_terms_hash".to_string(), "11".repeat(32));
+        params.custom_params.insert(
+            "usage_accounting_policy".to_string(),
+            "exo-economy-use-event-v1".to_string(),
+        );
+        params
+            .custom_params
+            .insert("settlement_ruleset_id".to_string(), "22".repeat(32));
+        params
+    }
+
     fn ts(ms: u64) -> Timestamp {
         Timestamp::new(ms, 0)
     }
@@ -1750,6 +1772,84 @@ mod tests {
         // Must cover Termination clauses — emergencies expire fast.
         let cats: Vec<ClauseCategory> = template.clauses.iter().map(|c| c.category).collect();
         assert!(cats.contains(&ClauseCategory::Termination));
+    }
+
+    #[test]
+    fn licensure_template_requires_commercial_terms_and_all_clause_categories() {
+        let template = default_template(BailmentType::Licensure);
+        assert_eq!(template.bailment_type, BailmentType::Licensure);
+        assert_eq!(template.id, "licensure-standard-v1");
+        assert_eq!(template.name, "Standard Commercial Licensure Agreement");
+        assert_eq!(template.clauses.len(), 8);
+        assert!(template.clauses.iter().all(|clause| clause.required));
+
+        let categories = template
+            .clauses
+            .iter()
+            .map(|clause| clause.category)
+            .collect::<Vec<_>>();
+        for category in all_categories() {
+            assert!(
+                categories.contains(&category),
+                "Licensure template missing category: {category:?}"
+            );
+        }
+
+        let body = template
+            .clauses
+            .iter()
+            .map(|clause| clause.body.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required_placeholder in [
+            "{{licensed_product}}",
+            "{{licensed_scope}}",
+            "{{commercial_terms_hash}}",
+            "{{usage_accounting_policy}}",
+            "{{settlement_ruleset_id}}",
+        ] {
+            assert!(
+                body.contains(required_placeholder),
+                "Licensure template missing {required_placeholder}"
+            );
+        }
+    }
+
+    #[test]
+    fn licensure_composition_fails_closed_without_complete_commercial_terms() {
+        let template = default_template(BailmentType::Licensure);
+        let mut params = licensure_params();
+        params
+            .custom_params
+            .remove(&"usage_accounting_policy".to_string());
+        let missing = compose(&template, &params, "license-1", ts(1_700_000_000_100));
+        assert!(matches!(missing, Err(ConsentError::Denied(reason)) if reason.contains("usage_accounting_policy")));
+
+        let mut params = licensure_params();
+        params
+            .custom_params
+            .insert("licensed_scope".to_string(), "   ".to_string());
+        let empty = compose(&template, &params, "license-2", ts(1_700_000_000_100));
+        assert!(matches!(empty, Err(ConsentError::Denied(reason)) if reason.contains("licensed_scope")));
+    }
+
+    #[test]
+    fn licensure_composition_resolves_every_commercial_placeholder() {
+        let template = default_template(BailmentType::Licensure);
+        let contract = compose_test(&template, &licensure_params());
+        let body = rendered_contract_body(&contract);
+
+        assert!(body.contains("CyberMedica"));
+        assert!(body.contains("exo-economy-use-event-v1"));
+        assert!(!body.contains("{{"), "contract retained an unresolved placeholder");
+    }
+
+    #[test]
+    fn composition_rejects_unresolved_placeholders() {
+        let mut template = default_template(BailmentType::Custody);
+        template.clauses[0].body.push_str(" {{unknown_required_value}}");
+        let result = compose(&template, &test_params(), "contract-1", ts(1_700_000_000_100));
+        assert!(matches!(result, Err(ConsentError::Denied(reason)) if reason.contains("unknown_required_value")));
     }
 
     // -- Test 19: compose with a Delegation template composes + hashes --

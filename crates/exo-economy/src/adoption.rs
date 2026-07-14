@@ -444,7 +444,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::{ValueBasis, test_support::*};
     use crate::{
-        bailment::test_support::{coherent_offer_acceptance_terms, sample_wrapper},
+        bailment::{
+            BailmentWrapperStatus,
+            test_support::{coherent_offer_acceptance_terms, sample_terms, sample_wrapper},
+        },
         value_contribution::test_support::h,
     };
 
@@ -470,6 +473,44 @@ mod tests {
         let adoption = sample_adoption().anchor().unwrap();
         let use_event = sample_use_event().anchor().unwrap();
         assert!(use_event.validate_against_adoption(&adoption).is_ok());
+    }
+
+    #[test]
+    fn commercial_use_requires_active_settlement_bailment_and_bound_accounting() {
+        let adoption = sample_adoption().anchor().unwrap();
+        let use_event = sample_use_event().anchor().unwrap();
+        let wrapper = sample_wrapper().anchor().unwrap();
+        let terms = sample_terms().anchor().unwrap();
+
+        assert!(
+            use_event
+                .validate_commercial_licensure(&adoption, &wrapper, &terms)
+                .is_ok()
+        );
+
+        let mut inactive_wrapper = wrapper.clone();
+        inactive_wrapper.status = BailmentWrapperStatus::Suspended;
+        assert!(
+            use_event
+                .validate_commercial_licensure(&adoption, &inactive_wrapper, &terms)
+                .is_err()
+        );
+
+        let mut noncommercial_terms = terms.clone();
+        noncommercial_terms.settlement_required = false;
+        assert!(
+            use_event
+                .validate_commercial_licensure(&adoption, &wrapper, &noncommercial_terms)
+                .is_err()
+        );
+
+        let mut unbound_use = use_event;
+        unbound_use.using_system = "different-product".into();
+        assert!(
+            unbound_use
+                .validate_commercial_licensure(&adoption, &wrapper, &terms)
+                .is_err()
+        );
     }
 
     #[test]
