@@ -664,9 +664,13 @@ those, do not duplicate them here.
   update script runs `rustup default stable` after updating — without that,
   `cargo build` fails with an edition2024 error. Nightly + `rustfmt` are
   installed only for the `cargo +nightly fmt` gate.
-- The full `cargo test --workspace` gate compiles ~30 crates and lists ~6,236
-  tests; it is slow. During iteration, scope with `-p <crate>` (crate package
-  names are `exochain-*`, e.g. `-p exochain-core`, `-p exochain-economy`).
+- The full `cargo test --workspace` gate is slow. Derive the current package
+  inventory with
+  `cargo metadata --no-deps --format-version 1 | jq '.packages | length'` and
+  the current test inventory with `cargo test --workspace -- --list`; do not
+  copy either count into durable instructions.
+  During iteration, scope with `-p <crate>` (crate package names are
+  `exochain-*`, e.g. `-p exochain-core`, `-p exochain-economy`).
 - `livesafe/` is intentionally excluded from the Cargo workspace (proprietary
   subtree); workspace cargo gates never reach into it.
 
@@ -677,11 +681,17 @@ The runnable binaries persist through Postgres via `sqlx`. Postgres is a
 the update script). Start it and create a DB before running the servers:
 
 ```bash
-sudo pg_ctlcluster 16 main start
+read -r cluster_version cluster_name _ < <(pg_lsclusters --no-header | awk 'NR == 1 { print $1, $2 }')
+test -n "$cluster_version" && test -n "$cluster_name"
+sudo pg_ctlcluster "$cluster_version" "$cluster_name" start
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres psql -c "CREATE DATABASE exochain;"
 export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/exochain"
 ```
+
+The literal `postgres` password above is restricted to an isolated,
+disposable local VM. Never reuse it in a shared, staging, or production
+database; obtain those credentials from the environment's secret manager.
 
 Schema migrations run automatically on gateway/node startup (the DAG DB schema
 is embedded in the binary via `sqlx::migrate!` and provisioned into a dedicated
