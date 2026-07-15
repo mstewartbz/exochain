@@ -1,0 +1,23 @@
+LiveSafe Demo — Proprietary and Confidential
+Copyright (c) 2026 Exochain Foundation. All rights reserved.
+
+This directory and all of its contents are LiveSafe product software. They are
+not licensed under the Apache License, Version 2.0 that applies to EXOCHAIN core
+primitives.
+
+No license, express or implied, is granted to use, copy, modify, merge, publish,
+distribute, sublicense, create derivative works from, or sell any portion of
+this directory except under separate commercial terms authorized by the
+Exochain Foundation. Authorized use must be bound to an EXOCHAIN Licensure
+bailment and the applicable EXOCHAIN usage-accounting and settlement records.
+
+The presence of this source in a public repository is for transparency and
+reference only. All rights not expressly granted are reserved.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM THE SOFTWARE OR ITS USE.
+
+For licensing inquiries: legal@exochain.org

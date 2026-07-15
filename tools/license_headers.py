@@ -49,6 +49,7 @@ HEADER_LINES = [
 EXCLUDED_PREFIXES = (
     "coverage/",
     "demo/coverage/",
+    "demo/apps/livesafe/",
     "livesafe/",
     "cybermedica/",
     "command-base/",
