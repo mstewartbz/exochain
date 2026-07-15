@@ -17,7 +17,7 @@
 [package]
 name = "exochain-wasm"
 description = "ExoChain governance engine — WebAssembly bindings for Node.js"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
