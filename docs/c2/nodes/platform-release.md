@@ -35,7 +35,7 @@ flowchart LR
 
 ## SSOTs (progress by reference)
 
-- Gap / decision refs: `v0.2.2+`
+- Gap / decision refs: `v0.2.3+`
 - Progress sources: `CHANGELOG / repo_truth`
 - HOW owners: `CI / Railway`
 

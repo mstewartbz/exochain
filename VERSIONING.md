@@ -35,8 +35,13 @@ MAJOR.MINOR.PATCH
 The workspace version is set in `Cargo.toml`:
 ```toml
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 ```
+
+This repository state is an unpublished `0.2.3` release candidate. The latest
+published release claim remains `v0.2.1-beta`; repository version alignment is
+not evidence of a tag, GitHub Release, registry publication, deployment, or live
+runtime activation.
 
 ## Release Process
 
@@ -85,9 +90,9 @@ Create and verify the signed release tag only after the key is configured:
 
 ```bash
 git fetch origin main --tags
-git tag -s v0.2.2 "$(git rev-parse origin/main)" -m "EXOCHAIN v0.2.2"
-git tag -v v0.2.2
-git push origin v0.2.2
+git tag -s v0.2.3 "$(git rev-parse origin/main)" -m "EXOCHAIN v0.2.3"
+git tag -v v0.2.3
+git push origin v0.2.3
 ```
 
 ### Dry Run
@@ -137,10 +142,10 @@ resolution requiring retraction.
 
 ```bash
 # Yank a specific crate version (repeats for each affected crate)
-cargo yank --version 0.2.2 exochain-core
+cargo yank --version 0.2.3 exochain-core
 
 # Restore a yank if issued in error
-cargo yank --version 0.2.2 exochain-core --undo
+cargo yank --version 0.2.3 exochain-core --undo
 ```
 
 Yanks must be logged as a governance action: open an issue with label
