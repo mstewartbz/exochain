@@ -1,5 +1,5 @@
 -- CrossChecked.ai: Plural Intelligence Verification Platform
--- Powered by EXOCHAIN Constitutional Trust Fabric
+-- Proprietary adjacent CrossChecked demo schema
 -- Production schema — full parity with sybil-cli + 5-panel AI-IRB council
 
 -- Crosscheck policy configuration

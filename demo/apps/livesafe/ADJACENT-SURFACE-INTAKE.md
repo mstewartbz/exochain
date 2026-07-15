@@ -1,24 +1,67 @@
-# LiveSafe Adjacent Surface Intake
+# LiveSafe Demo Adjacent-Surface Intake
 
 LiveSafe is not the canonical EXOCHAIN Rust trust fabric.
 
-- Owner/accountable maintainer: Exochain Foundation / LiveSafe maintainer
-- Deployment status: `prototype`
-- Constitutional trust claims: none. This React shell does not prove EXOCHAIN
-  enforcement and cannot mint or simulate core outcomes.
-- Core state access: none in the current browser build. Browser crypto and API
-  calls are adjacent behavior unless a separately tested core adapter is used.
-- Exact trust boundary: all files under `demo/apps/livesafe` are proprietary
-  adjacent product code. Canonical Rust APIs and generated WASM bindings remain
-  outside the app and are the only possible enforcement authorities.
-- Test and CI gate: `npm --prefix demo/apps/livesafe ci`,
-  `npm --prefix demo/apps/livesafe run surface-policy:check`,
-  `npm --prefix demo/apps/livesafe run build`, and
-  `npm --prefix demo/apps/livesafe audit --audit-level=moderate`.
-- Secrets and configuration: Vite environment and same-origin API proxy only.
-  No core signing keys, bootstrap tokens, tenant secrets, authority material,
-  or emergency-override credentials are permitted.
-- Rollback/disablement: remove the hosting route or stop the app. Core state is
-  unaffected.
-- Licensing: commercial terms are required through an active EXOCHAIN bailment
-  licensure record and EXOCHAIN usage accounting.
+## Classification and ownership
+
+- Path classification: proprietary adjacent surface.
+- Product: LiveSafe.
+- Owner: Exochain Foundation.
+- Accountable maintainer: Bob Stewart.
+- Deployment status: prototype. A Railway manifest exists, but this record does
+  not assert that any deployment or public route is currently active.
+- License: commercial terms required. This surface is `UNLICENSED` for package
+  metadata purposes and is governed by `LICENSE` in this directory.
+
+## Constitutional trust-claim boundary
+
+- This surface is not allowed to claim EXOCHAIN constitutional enforcement.
+- It is a static browser client for an adjacent `/api` service. Its development
+  proxy does not call an EXOCHAIN core API directly and cannot mint consent,
+  authority, provenance, governance, licensure, or usage-accounting outcomes.
+- Any backend integration remains outside the browser trust boundary. A backend
+  response is not an EXOCHAIN decision unless a separately tested core runtime
+  adapter verifies and returns it.
+- Product use requires commercial terms tracked through an EXOCHAIN
+  `Licensure` bailment, `exo-economy-use-event-v1` accounting, and settlement.
+
+## Core-state and data access
+
+- Direct EXOCHAIN core reads: none.
+- Direct EXOCHAIN core writes: none.
+- Adjacent reads and writes: the browser calls relative `/api` routes for
+  profiles, emergency plans, trustees, key generation, and related LiveSafe
+  state. The Vite development proxy targets `http://localhost:3011`.
+- Sensitive boundary: `/api/keys/generate` returns a LiveSafe keypair to the
+  browser. The client stores the secret locally; it must never be treated as or
+  share scope with an EXOCHAIN bootstrap, signing, tenant, or emergency-override
+  credential.
+
+## Validation and CI
+
+- Install/build: `npm --prefix demo/apps/livesafe ci && npm --prefix
+  demo/apps/livesafe run surface-policy:check && npm --prefix
+  demo/apps/livesafe run build`.
+- Dependency audit: `npm --prefix demo/apps/livesafe audit --audit-level=moderate`.
+- Boundary guard: `bash tools/test_livesafe_demo_security.sh`.
+- CI gate: Gate 9 runs the LiveSafe guard and the broad demo boundary guard.
+- Host-header enforcement: Vite preview accepts only localhost, loopback,
+  Railway health checks, and Railway subdomains.
+
+## Secrets and runtime configuration
+
+- Static-build secrets: none permitted. No secret may be placed in a Vite
+  client environment variable or committed source.
+- Browser-held material: the adjacent API-generated LiveSafe keypair described
+  above; stored client-side and scoped only to this product.
+- Runtime source: Railway supplies `PORT`; Vite preview configuration supplies
+  the host allowlist. The local development API target is fixed to loopback.
+
+## Disablement and rollback
+
+- Disablement: remove or disable the Railway service/public route and stop the
+  Vite preview process.
+- Code rollback: revert the product deployment to the last validated commit.
+- Trust-claim rollback: remove the surface from public routing. Do not replace a
+  failed adapter or host check with cached, simulated, or locally minted trust
+  output.

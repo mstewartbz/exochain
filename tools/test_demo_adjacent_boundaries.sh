@@ -65,6 +65,19 @@ if [[ -n "$apache_files" ]]; then
   }
 fi
 
+unsupported_claims="$(
+  git grep -n -E \
+    'Powered by EXOCHAIN|Trust Fabric:[[:space:]]*EXOCHAIN|EXOCHAIN CGR Kernel ready|Secure kernel ready' \
+    -- demo \
+    ':!demo/coverage/**' \
+    ':!demo/apps/*/scripts/check-surface-policy.mjs' \
+    || true
+)"
+[[ -z "$unsupported_claims" ]] || {
+  printf '%s\n' "$unsupported_claims" >&2
+  fail "unsupported EXOCHAIN constitutional trust claims remain in adjacent demo files"
+}
+
 tracked_demo_files="$(mktemp)"
 trap 'rm -f "$tracked_demo_files"' EXIT
 git ls-files demo | grep -Ev '(^demo/coverage/|(^|/)(node_modules|wasm)/)' > "$tracked_demo_files"

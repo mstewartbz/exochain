@@ -60,12 +60,60 @@ grep -F '"cybermedica/",' tools/license_headers.py >/dev/null \
 
 grep -F 'Apache-2.0 for EXOCHAIN core' README.md >/dev/null \
   || fail 'README must scope Apache-2.0 to EXOCHAIN core'
-grep -F '`livesafe/` and `cybermedica/`' README.md >/dev/null \
-  || fail 'README must identify both proprietary subtrees'
-grep -F '`livesafe/LICENSE`' README.md >/dev/null \
+grep -F '[livesafe/LICENSE](livesafe/LICENSE)' README.md >/dev/null \
   || fail 'README must cite the LiveSafe license'
-grep -F '`cybermedica/LICENSE`' README.md >/dev/null \
+grep -F '[cybermedica/LICENSE](cybermedica/LICENSE)' README.md >/dev/null \
   || fail 'README must cite the CyberMedica license'
+
+registry='governance/commercial-product-licensing.json'
+[ -f "$registry" ] || fail "$registry is missing"
+
+expected_products="$(printf '%s\n' 'CrossChecked' 'CyberMedica' 'Decision Forum' 'LegalDyne' 'LiveSafe')"
+actual_products="$(jq -r '.products[].name' "$registry" | LC_ALL=C sort)"
+[ "$actual_products" = "$expected_products" ] \
+  || fail 'commercial product registry must contain exactly CrossChecked, CyberMedica, Decision Forum, LegalDyne, and LiveSafe'
+
+jq -e '
+  .schema_version == 1 and
+  .core_license == "Apache-2.0" and
+  .licensure_template == "licensure-standard-v1" and
+  .usage_accounting_policy == "exo-economy-use-event-v1" and
+  (.products | length == 5) and
+  all(.products[];
+    .license_model == "commercial" and
+    .bailment_type == "Licensure" and
+    .usage_accounting_policy == "exo-economy-use-event-v1" and
+    .settlement_required == true and
+    .apache_by_proximity == false
+  )
+' "$registry" >/dev/null \
+  || fail 'commercial product registry must require licensure bailment, canonical usage accounting, and settlement'
+
+jq -e '
+  .products[] |
+  select(.name == "Decision Forum") |
+  .product_boundary == "external proprietary product" and
+  .apache_core_primitive == "crates/decision-forum"
+' "$registry" >/dev/null \
+  || fail 'Decision Forum product must remain distinct from the Apache core primitive'
+
+grep -F 'Licensure,' crates/exo-consent/src/bailment.rs >/dev/null \
+  || fail 'exo-consent must expose the Licensure bailment type'
+grep -F 'licensure-standard-v1' crates/exo-consent/src/contract.rs >/dev/null \
+  || fail 'exo-consent must expose the canonical licensure template'
+grep -F 'exo-economy-use-event-v1' crates/exo-consent/src/contract.rs >/dev/null \
+  || fail 'licensure contracts must bind the canonical usage-accounting policy'
+grep -F 'validate_commercial_licensure' crates/exo-economy/src/adoption.rs >/dev/null \
+  || fail 'exo-economy must validate commercial use against licensure accounting'
+
+for product in 'Decision Forum' LegalDyne CyberMedica LiveSafe CrossChecked; do
+  grep -F "$product" docs/legal/LICENSING-POSITION.md >/dev/null \
+    || fail "licensing position must classify $product"
+done
+grep -F 'commercial-product-licensing.json' README.md >/dev/null \
+  || fail 'README must cite the commercial product licensing registry'
+grep -F '`crates/decision-forum` remains an Apache-2.0 core primitive' README.md >/dev/null \
+  || fail 'README must distinguish the Decision Forum product from its core primitive'
 
 license_section="$(
   awk '
@@ -82,5 +130,9 @@ printf '%s\n' "$license_section" | grep -F '[livesafe/LICENSE](livesafe/LICENSE)
   || fail 'README License section must cite the LiveSafe license'
 printf '%s\n' "$license_section" | grep -F '[cybermedica/LICENSE](cybermedica/LICENSE)' >/dev/null \
   || fail 'README License section must cite the CyberMedica license'
+for product in 'Decision Forum' LegalDyne CrossChecked; do
+  printf '%s\n' "$license_section" | grep -F "$product" >/dev/null \
+    || fail "README License section must identify $product as commercially licensed"
+done
 
 printf 'proprietary license boundary test passed\n'

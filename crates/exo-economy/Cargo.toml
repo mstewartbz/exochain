@@ -17,7 +17,7 @@
 [package]
 name = "exochain-economy"
 description = "EXOCHAIN custody-native transaction economy — quote, settle, and revenue-share scaffolding with zero-priced launch policy"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-economy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

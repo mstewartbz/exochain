@@ -21,10 +21,10 @@ export default function Login({ mode: initialMode = 'login' }: Props) {
   const handleSubmit = async () => {
     if (!passphrase || !apiToken.trim()) return;
     setIsLoading(true);
-    setStatus('Deriving secure identity...');
+    setStatus('Hashing passphrase locally and requesting LiveSafe keys...');
 
     try {
-      // Derive identity from passphrase (zero-knowledge)
+      // Hash the passphrase locally; the passphrase itself never leaves this browser.
       const encoder = new TextEncoder();
       const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(passphrase));
       const hashArray = new Uint8Array(hashBuffer);
@@ -157,7 +157,7 @@ export default function Login({ mode: initialMode = 'login' }: Props) {
         )}
 
         <p className="text-[10px] text-white/20 text-center mt-10">
-          Your passphrase never leaves this device. Keys are derived locally.
+          Your passphrase never leaves this device. LiveSafe encryption keys are returned by the adjacent API and stored for this browser session.
         </p>
       </div>
     </div>

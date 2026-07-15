@@ -271,6 +271,10 @@ jobs:
         run: bash tools/test_proprietary_license_boundaries.sh
       - name: Demo proprietary adjacent boundaries
         run: bash tools/test_demo_adjacent_boundaries.sh
+      - name: LiveSafe demo adjacent-surface boundary
+        run: bash tools/test_livesafe_demo_security.sh
+      - name: CommandBase adjacent release hardening
+        run: bash tools/test_commandbase_release_hardening.sh
       - name: No GAP stubs remaining in code (A-102)
         # Fails if any `STUB` marker referencing a GAP-NNN identifier
         # remains in a code file. Prevents a GAP from being marked closed
@@ -755,6 +759,13 @@ jobs:
           path: packages/exochain-wasm/wasm/
       - name: Run bridge verification
         run: node packages/exochain-wasm/test/bridge_verification.mjs
+      - name: Verify demo WASM adapter source boundary
+        run: bash tools/test_demo_wasm_adapter_boundary.sh
+      - name: Verify demo WASM adapter runtime
+        run: |
+          mkdir -p demo/packages/exochain-wasm/wasm
+          cp -R packages/exochain-wasm/wasm/. demo/packages/exochain-wasm/wasm/
+          node demo/packages/exochain-wasm/test.mjs
 
   # -----------------------------------------------------------------------
   # Gate 22: WASM export count sync

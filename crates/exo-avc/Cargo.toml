@@ -17,7 +17,7 @@
 [package]
 name = "exochain-avc"
 description = "EXOCHAIN Autonomous Volition Credential — portable signed credential for autonomous agent intent, authority, constraints, delegation, revocation, and trust receipts"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-avc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

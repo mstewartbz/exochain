@@ -161,7 +161,7 @@ export default function Login({ mode }: LoginProps) {
           {/* Status */}
           <div className="mt-6 pt-4 border-t border-white/5 flex items-center justify-center gap-2">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs text-gray-500">Secure kernel ready</span>
+            <span className="text-xs text-gray-500">Adjacent service ready</span>
           </div>
         </div>
 

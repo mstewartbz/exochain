@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 /* ===================================================================
    CommandBase.ai -- Frontend Application
    Single-page client with hash-based routing
@@ -10744,9 +10728,7 @@
   }
 
   function renderProviderCard(p) {
-    var maskedKey = p.api_key || '';
-    if (maskedKey.length > 8) maskedKey = maskedKey.slice(0, 4) + '****' + maskedKey.slice(-4);
-    else if (maskedKey.length > 0) maskedKey = '****' + maskedKey.slice(-4);
+    var maskedKey = p.api_key ? maskApiKey(p.api_key) : '';
     var html = '<div class="provider-card" data-provider-id="' + p.id + '">';
     html += '<div class="provider-card-header">';
     html += '<div class="provider-card-title">';
@@ -10768,10 +10750,7 @@
     html += '<div class="provider-detail-row">';
     html += '<span class="provider-detail-label">API Key</span>';
     html += '<span class="provider-detail-value provider-api-key-display">';
-    html += '<code class="provider-masked-key" data-full-key="' + escHtml(p.api_key || '') + '" data-masked="' + escHtml(maskedKey) + '">' + escHtml(maskedKey || 'None') + '</code>';
-    if (p.api_key) {
-      html += ' <button class="provider-key-toggle" title="Show/Hide">Show</button>';
-    }
+    html += '<code class="provider-masked-key" data-masked="' + escHtml(maskedKey) + '">' + escHtml(maskedKey || 'None') + '</code>';
     html += '</span>';
     html += '</div>';
     html += '<div class="provider-detail-row">';
@@ -10795,6 +10774,8 @@
   function renderProviderForm(existingProvider) {
     var p = existingProvider || {};
     var isEdit = !!p.id;
+    var apiKeyValue = isEdit ? '' : (p.api_key || '');
+    var apiKeyPlaceholder = isEdit ? 'Leave blank to keep existing key' : 'sk-...';
     var html = '<div class="provider-form">';
     html += '<div class="provider-form-title">' + (isEdit ? 'Edit Provider' : 'Add New Provider') + '</div>';
     html += '<div class="provider-form-grid">';
@@ -10820,7 +10801,7 @@
     html += '</div>';
     html += '<div class="config-field">';
     html += '<label>API Key</label>';
-    html += '<input type="password" class="pf-api-key" value="' + escHtml(p.api_key || '') + '" placeholder="sk-...">';
+    html += '<input type="password" class="pf-api-key" value="' + escHtml(apiKeyValue) + '" placeholder="' + escHtml(apiKeyPlaceholder) + '">';
     html += '</div>';
     html += '<div class="config-field">';
     html += '<label>Default Model</label>';
@@ -11121,22 +11102,6 @@
         });
       }
 
-      // Show/Hide API key
-      var keyToggle = card.querySelector('.provider-key-toggle');
-      if (keyToggle) {
-        keyToggle.addEventListener('click', function() {
-          var codeEl = card.querySelector('.provider-masked-key');
-          var fullKey = codeEl.dataset.fullKey;
-          var masked = codeEl.dataset.masked;
-          if (keyToggle.textContent === 'Show') {
-            codeEl.textContent = fullKey;
-            keyToggle.textContent = 'Hide';
-          } else {
-            codeEl.textContent = masked;
-            keyToggle.textContent = 'Show';
-          }
-        });
-      }
     });
   }
 
@@ -11186,7 +11151,10 @@
 
         if (!name) { showToast('Provider name is required', 'error'); return; }
 
-        var body = { name: name, type: type, base_url: base_url, api_key: api_key, default_model: default_model, enabled: 1 };
+        var body = { name: name, type: type, base_url: base_url, default_model: default_model, enabled: 1 };
+        if (!existingProvider || api_key) {
+          body.api_key = api_key;
+        }
 
         // Include session fields for perplexity/session_token types
         if (type === 'perplexity' || type === 'session_token') {
@@ -32471,8 +32439,8 @@
       +     '<div class="intake-drop-icon"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg></div>'
       +     '<div class="intake-drop-text">Drop files or folders here</div>'
       +     '<div class="intake-drop-subtext">or click to browse</div>'
-      +     '<div class="intake-drop-types">Accepted: .md, .txt, .js, .py, .json, .ts, .css, .html, .yaml, .yml, .toml, .pdf, .zip</div>'
-      +     '<input type="file" id="intake-file-input" multiple style="display:none" accept=".md,.txt,.js,.py,.json,.ts,.css,.html,.yaml,.yml,.toml,.pdf,.zip" />'
+      +     '<div class="intake-drop-types">Accepted: .md, .txt, .js, .jsx, .ts, .tsx, .py, .rs, .go, .json, .csv, .css, .yaml, .yml, .toml, .pdf, .zip, images</div>'
+      +     '<input type="file" id="intake-file-input" multiple style="display:none" accept=".md,.txt,.js,.jsx,.ts,.tsx,.py,.rs,.go,.json,.csv,.css,.yaml,.yml,.toml,.pdf,.zip,.png,.jpg,.jpeg,.gif,.webp" />'
       +   '</div>'
       // Attached files list
       +   '<div class="intake-section" id="intake-attached-section" style="display:none">'
@@ -32494,7 +32462,7 @@
       +       '<button class="intake-btn intake-btn-secondary" id="intake-browse-folder-btn">Browse Folder</button>'
       +       '<button class="intake-btn intake-btn-secondary" id="intake-browse-file-btn">Browse File</button>'
       +       '<input type="file" id="intake-folder-input" webkitdirectory multiple style="display:none" />'
-      +       '<input type="file" id="intake-single-file-input" multiple style="display:none" accept=".md,.txt,.js,.py,.json,.ts,.css,.html,.yaml,.yml,.toml,.pdf,.zip" />'
+      +       '<input type="file" id="intake-single-file-input" multiple style="display:none" accept=".md,.txt,.js,.jsx,.ts,.tsx,.py,.rs,.go,.json,.csv,.css,.yaml,.yml,.toml,.pdf,.zip,.png,.jpg,.jpeg,.gif,.webp" />'
       +     '</div>'
       +   '</div>'
       // Additional context
@@ -32543,7 +32511,7 @@
     });
 
     function processFiles(fileList) {
-      var acceptedExts = ['.md','.txt','.js','.py','.json','.ts','.css','.html','.yaml','.yml','.toml','.pdf','.zip'];
+      var acceptedExts = ['.md','.txt','.js','.jsx','.ts','.tsx','.py','.rs','.go','.json','.csv','.css','.yaml','.yml','.toml','.pdf','.zip','.png','.jpg','.jpeg','.gif','.webp'];
       for (var i = 0; i < fileList.length; i++) {
         var file = fileList[i];
         var ext = '.' + file.name.split('.').pop().toLowerCase();
@@ -32554,7 +32522,7 @@
             intakeFiles.push({ name: f.name, content: ev.target.result, size: f.size });
             renderAttached();
           };
-          if (fext === '.pdf' || fext === '.zip') {
+          if (fext === '.pdf' || fext === '.zip' || ['.png','.jpg','.jpeg','.gif','.webp'].indexOf(fext) !== -1) {
             reader.readAsDataURL(f);
           } else {
             reader.readAsText(f);
@@ -32634,7 +32602,7 @@
       var folderName = files[0].webkitRelativePath ? files[0].webkitRelativePath.split('/')[0] : 'folder';
       var folderEntry = { name: folderName, path: folderName, fileCount: 0, fileContents: [] };
 
-      var acceptedExts = ['.md','.txt','.js','.py','.json','.ts','.css','.html','.yaml','.yml','.toml'];
+      var acceptedExts = ['.md','.txt','.js','.jsx','.ts','.tsx','.py','.rs','.go','.json','.csv','.css','.yaml','.yml','.toml'];
       var pending = 0;
       for (var i = 0; i < files.length && i < 30; i++) {
         var ext = '.' + files[i].name.split('.').pop().toLowerCase();

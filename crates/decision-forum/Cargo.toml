@@ -17,7 +17,7 @@
 [package]
 name = "exochain-decision-forum"
 description = "EXOCHAIN decision.forum — constitutional governance application layer"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-decision-forum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
