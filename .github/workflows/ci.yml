@@ -269,6 +269,8 @@ jobs:
           echo "✓ EXOCHAIN workspace license consistent: Apache-2.0"
       - name: Proprietary subtree license boundaries
         run: bash tools/test_proprietary_license_boundaries.sh
+      - name: Demo proprietary adjacent boundaries
+        run: bash tools/test_demo_adjacent_boundaries.sh
       - name: LiveSafe demo adjacent-surface boundary
         run: bash tools/test_livesafe_demo_security.sh
       - name: CommandBase adjacent release hardening

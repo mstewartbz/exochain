@@ -23,7 +23,7 @@ vite_config="$app_dir/vite.config.ts"
 package_json="$app_dir/package.json"
 package_lock="$app_dir/package-lock.json"
 license_file="$app_dir/LICENSE"
-intake_file="$app_dir/INTAKE.md"
+intake_file="$app_dir/ADJACENT-SURFACE-INTAKE.md"
 
 [ -f "$license_file" ] || {
   echo "LiveSafe demo proprietary LICENSE is required" >&2

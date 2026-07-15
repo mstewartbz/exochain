@@ -1,0 +1,17 @@
+EXOCHAIN DEMO PROPRIETARY LICENSE NOTICE
+
+Copyright 2026 Exochain Foundation. All rights reserved.
+
+Except for `demo/packages/exochain-wasm`, which is an Apache-2.0 wrapper of the
+canonical EXOCHAIN core WASM primitive, the `demo/` subtree is proprietary
+adjacent software. Possession of the source does not grant permission to use,
+copy, modify, distribute, host, sublicense, or create derivative works.
+
+Any authorized use requires written commercial terms from the Exochain
+Foundation. CrossChecked and LiveSafe use additionally requires an active
+EXOCHAIN bailment licensure record and EXOCHAIN usage accounting under the
+applicable commercial terms. No adjacent demo may inherit Apache-2.0 rights,
+constitutional trust claims, production credentials, or EXOCHAIN core signing
+authority by proximity.
+
+For commercial licensing, contact the Exochain Foundation.

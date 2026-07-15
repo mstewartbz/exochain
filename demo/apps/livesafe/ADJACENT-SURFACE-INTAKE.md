@@ -1,5 +1,7 @@
 # LiveSafe Demo Adjacent-Surface Intake
 
+LiveSafe is not the canonical EXOCHAIN Rust trust fabric.
+
 ## Classification and ownership
 
 - Path classification: proprietary adjacent surface.
@@ -37,9 +39,12 @@
 
 ## Validation and CI
 
-- Install/build: `cd demo/apps/livesafe && npm ci && npm run build`.
+- Install/build: `npm --prefix demo/apps/livesafe ci && npm --prefix
+  demo/apps/livesafe run surface-policy:check && npm --prefix
+  demo/apps/livesafe run build`.
+- Dependency audit: `npm --prefix demo/apps/livesafe audit --audit-level=moderate`.
 - Boundary guard: `bash tools/test_livesafe_demo_security.sh`.
-- CI gate: Gate 9 runs the boundary guard.
+- CI gate: Gate 9 runs the LiveSafe guard and the broad demo boundary guard.
 - Host-header enforcement: Vite preview accepts only localhost, loopback,
   Railway health checks, and Railway subdomains.
 
