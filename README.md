@@ -363,6 +363,8 @@ See the
 [livesafe/LICENSE](livesafe/LICENSE), [cybermedica/LICENSE](cybermedica/LICENSE),
 [LICENSE](LICENSE), and
 [docs/legal/LICENSING-POSITION.md](docs/legal/LICENSING-POSITION.md).
+CommandBase is a proprietary internal adjacent surface, not a core primitive;
+its separate terms are in [command-base/LICENSE](command-base/LICENSE).
 
 ---
 *EXOCHAIN Foundation — Judicial Build Governance*

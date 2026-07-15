@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 // Command Base v2.0
 const express = require('express');
 const compression = require('compression');
@@ -26,10 +10,18 @@ const {
 } = require('./lib/commandbase-db-factory');
 const { mountCommandBaseUiStateRoutes } = require('./lib/commandbase-ui-state');
 const { mountPresidentialRoutes } = require('./lib/presidential-desk');
+const {
+  commandBaseUploadFileFilter,
+  sanitizeCommandBaseUploadFilename,
+} = require('./lib/upload-policy');
 
 // ── Structured logger — must come before any console.* calls ──
 const logger = require('./logger');
 logger.overrideConsole();
+const {
+  configureWebhookSecretSetting,
+  requireWebhookSecret,
+} = require('./lib/webhook-auth');
 
 const http = require('http');
 const https = require('https');
@@ -394,8 +386,8 @@ function scheduleWalCheckpoint() {
 
 scheduleWalCheckpoint();
 
-// Seed webhook_secret setting (empty = open for initial setup)
-db.exec(`INSERT OR IGNORE INTO system_settings (key, value) VALUES ('webhook_secret', '')`);
+// Seed webhook_secret setting; empty or missing values fail closed at webhook ingress.
+configureWebhookSecretSetting(db);
 
 // Seed backup_dir setting (empty = use DEFAULT_BACKUP_DIR / BACKUP_DIR env var)
 db.exec(`INSERT OR IGNORE INTO system_settings (key, value) VALUES ('backup_dir', '')`);
@@ -3685,12 +3677,15 @@ const storage = multer.diskStorage({
     cb(null, INBOX_PATH);
   },
   filename: (req, file, cb) => {
-    // Preserve original filename, prefix with timestamp to avoid collisions
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    cb(null, `${timestamp}_${file.originalname}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
-const upload = multer({ storage, limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB limit for project imports
+const upload = multer({
+  storage,
+  fileFilter: commandBaseUploadFileFilter,
+  limits: { fileSize: 200 * 1024 * 1024 }
+}); // 200MB limit for project imports
 
 // ── Context Management System Functions ──────────────────────
 
@@ -5521,11 +5516,12 @@ const taskAttachmentStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    cb(null, `${timestamp}_${file.originalname}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
 const uploadTaskAttachment = multer({
   storage: taskAttachmentStorage,
+  fileFilter: commandBaseUploadFileFilter,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
 
@@ -6052,12 +6048,12 @@ const commandUploadStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${timestamp}_${safeName}`);
+    cb(null, `${timestamp}_${sanitizeCommandBaseUploadFilename(file.originalname)}`);
   }
 });
 const uploadCommandFiles = multer({
   storage: commandUploadStorage,
+  fileFilter: commandBaseUploadFileFilter,
   limits: { fileSize: 50 * 1024 * 1024, files: 10 }
 });
 
@@ -8760,13 +8756,9 @@ async function dispatchNotification(notification) {
 // POST /api/webhooks/sms — Twilio sends incoming SMS here
 app.post('/api/webhooks/sms', (req, res) => {
   try {
-    // Webhook authentication
-    const webhookSecret = db.prepare(`SELECT value FROM system_settings WHERE key = 'webhook_secret'`).get();
-    if (webhookSecret && webhookSecret.value) {
-      const provided = req.headers['x-webhook-secret'] || req.query.secret;
-      if (provided !== webhookSecret.value) {
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
+    const webhookAuth = requireWebhookSecret(req, db);
+    if (!webhookAuth.ok) {
+      return res.status(webhookAuth.status).json(webhookAuth.body);
     }
 
     const from = req.body.From || 'unknown';
@@ -8833,13 +8825,9 @@ app.post('/api/webhooks/sms', (req, res) => {
 // POST /api/webhooks/slack — Slack sends events/commands here
 app.post('/api/webhooks/slack', (req, res) => {
   try {
-    // Webhook authentication
-    const webhookSecret = db.prepare(`SELECT value FROM system_settings WHERE key = 'webhook_secret'`).get();
-    if (webhookSecret && webhookSecret.value) {
-      const provided = req.headers['x-webhook-secret'] || req.query.secret;
-      if (provided !== webhookSecret.value) {
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
+    const webhookAuth = requireWebhookSecret(req, db);
+    if (!webhookAuth.ok) {
+      return res.status(webhookAuth.status).json(webhookAuth.body);
     }
 
     // Handle Slack URL verification challenge
@@ -9150,29 +9138,32 @@ function assignMember(taskCategory, projectId) {
     ORDER BY
       running_tasks ASC,
       completed_tasks ASC,
-      RANDOM()
+      tm.id ASC
     LIMIT 5
   `).all();
 
   if (candidates.length === 0) {
     // Fallback: any active specialist, least loaded
     const fallback = db.prepare(`
-      SELECT id, name, role FROM team_members
-      WHERE status = 'active' AND tier = 'specialist'
-      ORDER BY (SELECT COUNT(*) FROM active_processes WHERE member_id = team_members.id AND status = 'completed') ASC, RANDOM()
+      SELECT id, name, role,
+        (SELECT COUNT(*) FROM active_processes WHERE member_id = team_members.id AND status = 'running') as running_tasks,
+        (SELECT COUNT(*) FROM active_processes WHERE member_id = team_members.id AND status = 'completed') as completed_tasks
+      FROM team_members
+      WHERE status = 'active'
+        AND tier = 'specialist'
+      ORDER BY running_tasks ASC, completed_tasks ASC, id ASC
       LIMIT 1
     `).get();
     return fallback || null;
   }
 
-  // If project specified, prefer members with affinity (but not always — 70/30 split for growth)
+  // If project specified, prefer the first affinity member in load-sorted order.
   if (projectId) {
     const affinityMember = candidates.find(c => {
       const affinity = db.prepare('SELECT id FROM project_affinity WHERE project_id = ? AND member_id = ?').get(projectId, c.id);
       return affinity !== undefined;
     });
-    // 70% chance affinity member, 30% chance someone new (growth opportunity)
-    if (affinityMember && Math.random() < 0.7) {
+    if (affinityMember) {
       return affinityMember;
     }
   }
@@ -9411,6 +9402,34 @@ const PROJECT_IMPROVEMENT_SEEDS = {
   ]
 };
 
+function compareTemplateText(left, right) {
+  const l = String(left || '').trim().toLowerCase();
+  const r = String(right || '').trim().toLowerCase();
+  if (l < r) return -1;
+  if (l > r) return 1;
+  return 0;
+}
+
+function deterministicTemplateOrder(left, right) {
+  const sourceOrder = left.sourceIndex - right.sourceIndex;
+  if (sourceOrder !== 0) return sourceOrder;
+
+  for (const field of ['category', 'impact', 'effort', 'title', 'tagline', 'description']) {
+    const leftValue = left.template && left.template[field];
+    const rightValue = right.template && right.template[field];
+    const byField = compareTemplateText(leftValue, rightValue);
+    if (byField !== 0) return byField;
+  }
+  return 0;
+}
+
+function rankTemplatesDeterministically(templates) {
+  return templates
+    .map((template, sourceIndex) => ({ template, sourceIndex }))
+    .sort(deterministicTemplateOrder)
+    .map(entry => entry.template);
+}
+
 /**
  * Auto-fill a project-specific improvement chamber.
  */
@@ -9430,8 +9449,7 @@ function autoFillProjectChamber(projectId) {
   // Get seeds for this project
   const seeds = PROJECT_IMPROVEMENT_SEEDS[project.name] || PROJECT_IMPROVEMENT_SEEDS['default'];
   const availableSeeds = seeds.filter(s => !existingTitles.includes(s.title.toLowerCase()));
-  const shuffled = availableSeeds.sort(() => Math.random() - 0.5);
-  const batch = shuffled.slice(0, needed);
+  const batch = rankTemplatesDeterministically(availableSeeds).slice(0, needed);
 
   let inserted = 0;
   for (const s of batch) {
@@ -10610,9 +10628,7 @@ function autoFillBrainstorm() {
   // Find templates not already used
   const available = BRAINSTORM_TEMPLATES.filter(t => !existingTitles.includes(t.title.toLowerCase()));
 
-  // Shuffle and pick what we need
-  const shuffled = available.sort(() => Math.random() - 0.5);
-  const toInsert = shuffled.slice(0, needed);
+  const toInsert = rankTemplatesDeterministically(available).slice(0, needed);
 
   for (const t of toInsert) {
     db.prepare(`INSERT INTO idea_board (title, tagline, description, category, status, generated_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`)
@@ -21956,8 +21972,14 @@ function runRefinementCycle(targetId) {
   const assignment = db.prepare(`
     SELECT tm.id, tm.name FROM refinement_team_assignments rta
     JOIN team_members tm ON rta.member_id = tm.id
+    LEFT JOIN refinement_candidates active
+      ON active.assigned_member_id = tm.id
+     AND active.target_id = rta.target_id
+     AND active.status = 'in_progress'
     WHERE rta.target_id = ? AND rta.enabled = 1 AND tm.status = 'active'
-    ORDER BY RANDOM() LIMIT 1
+    GROUP BY tm.id
+    ORDER BY COUNT(active.id) ASC, tm.id ASC
+    LIMIT 1
   `).get(targetId);
 
   if (!assignment) {
