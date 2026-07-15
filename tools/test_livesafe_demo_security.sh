@@ -56,6 +56,17 @@ if grep -Eq 'allowedHosts:[[:space:]]*true' "$vite_config"; then
   exit 1
 fi
 
+if git -C "$repo_root" grep -n -F 'Keys are derived locally' -- demo/apps/livesafe; then
+  echo "LiveSafe demo must not claim API-generated keys are derived locally" >&2
+  exit 1
+fi
+
+grep -F 'LiveSafe encryption keys are returned by the adjacent API' \
+  "$app_dir/src/pages/Login.tsx" >/dev/null || {
+  echo "LiveSafe demo login must disclose adjacent API key provenance" >&2
+  exit 1
+}
+
 if ! grep -Eq 'allowedHosts:[[:space:]]*previewAllowedHosts' "$vite_config"; then
   echo "LiveSafe demo Vite preview must use the explicit previewAllowedHosts allowlist" >&2
   exit 1
