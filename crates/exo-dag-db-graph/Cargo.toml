@@ -1,6 +1,7 @@
 [package]
 name = "exochain-dag-db-graph"
 description = "EXOCHAIN DAG DB graph and layered organization"
+documentation = "https://docs.rs/exochain-dag-db-graph"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

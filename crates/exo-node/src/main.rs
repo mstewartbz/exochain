@@ -76,7 +76,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use exo_core::types::{Did, PublicKey};
 #[cfg(feature = "unaudited-infrastructure-holons")]
-use holons::{HolonEvent, HolonManagerConfig};
+use holons::{HolonActorKey, HolonEvent, HolonManagerConfig};
 use libp2p_core::Multiaddr;
 use network::{NetworkConfig, NetworkEvent, NetworkHandle};
 use reactor::{ReactorConfig, ReactorEvent};
@@ -817,11 +817,52 @@ async fn start_node(
         let holon_authority_did = holon_identity.did.clone();
         let holon_authority_public_key = *holon_identity.public_key();
         let holon_authority_signer = Arc::new(move |message: &[u8]| holon_identity.sign(message));
+
+        let holon_identity_dir = data_dir.join("holons");
+        std::fs::create_dir_all(&holon_identity_dir)?;
+        let topology_holon_identity =
+            identity::load_or_create(&holon_identity_dir.join("topology"))?;
+        let scaling_holon_identity = identity::load_or_create(&holon_identity_dir.join("scaling"))?;
+        let health_holon_identity = identity::load_or_create(&holon_identity_dir.join("health"))?;
+
+        let topology_holon_did = topology_holon_identity.did.clone();
+        let topology_holon_public_key = *topology_holon_identity.public_key();
+        let scaling_holon_did = scaling_holon_identity.did.clone();
+        let scaling_holon_public_key = *scaling_holon_identity.public_key();
+        let health_holon_did = health_holon_identity.did.clone();
+        let health_holon_public_key = *health_holon_identity.public_key();
+
+        let mut holon_actor_keys = BTreeMap::new();
+        holon_actor_keys.insert(
+            topology_holon_did.clone(),
+            HolonActorKey {
+                public_key: topology_holon_public_key,
+                signer: Arc::new(move |message: &[u8]| topology_holon_identity.sign(message)),
+            },
+        );
+        holon_actor_keys.insert(
+            scaling_holon_did.clone(),
+            HolonActorKey {
+                public_key: scaling_holon_public_key,
+                signer: Arc::new(move |message: &[u8]| scaling_holon_identity.sign(message)),
+            },
+        );
+        holon_actor_keys.insert(
+            health_holon_did.clone(),
+            HolonActorKey {
+                public_key: health_holon_public_key,
+                signer: Arc::new(move |message: &[u8]| health_holon_identity.sign(message)),
+            },
+        );
         let holon_config = HolonManagerConfig {
             node_did: node_identity.did.clone(),
             root_did: holon_authority_did,
             root_public_key: holon_authority_public_key,
             root_signer: holon_authority_signer,
+            topology_holon_did,
+            scaling_holon_did,
+            health_holon_did,
+            holon_actor_keys,
             // No external attestation is wired yet: `root_did`/`root_public_key`/
             // `root_signer` above are all derived from the same freshly-loaded
             // node identity, i.e. a self-issued root authority with no

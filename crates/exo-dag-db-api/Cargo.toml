@@ -17,7 +17,7 @@
 [package]
 name = "exochain-dag-db-api"
 description = "EXOCHAIN DAG DB API DTO wire contracts"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-dag-db-api"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -17,7 +17,7 @@
 [package]
 name = "exochain-consent"
 description = "EXOCHAIN bailment-conditioned consent enforcement — no action without consent"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-consent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

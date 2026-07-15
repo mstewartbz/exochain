@@ -52,10 +52,9 @@ EXCLUDED_PREFIXES = (
     "demo/apps/livesafe/",
     "livesafe/",
     "cybermedica/",
+    "command-base/",
     "packages/exochain-sdk/dist/",
     "packages/exochain-sdk/dist-test/",
-    "command-base/.claude/reports/",
-    "command-base/.claude/research/",
 )
 EXCLUDED_SUFFIXES = (
     ".lock",

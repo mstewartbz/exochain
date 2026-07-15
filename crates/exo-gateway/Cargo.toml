@@ -17,7 +17,7 @@
 [package]
 name = "exochain-gateway"
 description = "EXOCHAIN constitutional trust fabric — HTTP gateway server with default-deny pattern"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

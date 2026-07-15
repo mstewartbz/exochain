@@ -1,6 +1,7 @@
 [package]
 name = "exochain-dag-db-domain"
 description = "EXOCHAIN DAG DB governed domain services"
+documentation = "https://docs.rs/exochain-dag-db-domain"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
