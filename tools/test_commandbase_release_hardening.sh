@@ -75,6 +75,8 @@ grep -F '"command-base/",' tools/license_headers.py >/dev/null \
   || fail 'Apache header utility must exclude command-base/'
 grep -F 'proprietary adjacent surface' command-base/EXOCHAIN_SURFACE_INTAKE.md >/dev/null \
   || fail 'CommandBase intake must classify the subtree as proprietary adjacent code'
+grep -F '[command-base/LICENSE](command-base/LICENSE)' README.md >/dev/null \
+  || fail 'root README must cite the CommandBase proprietary license'
 
 auth_source="$(<command-base/app/lib/auth.js)"
 [[ "$auth_source" == *"EXOCHAIN_AUTH_SECRET"* ]] || fail "auth fallback must use EXOCHAIN_AUTH_SECRET"

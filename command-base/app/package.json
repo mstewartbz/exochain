@@ -2,6 +2,8 @@
   "name": "the-team-dashboard",
   "version": "1.0.0",
   "description": "Local dashboard for The Team's DAG DB-backed CommandBase state",
+  "license": "UNLICENSED",
+  "private": true,
   "main": "server.js",
   "scripts": {
     "test": "node --test",
