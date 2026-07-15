@@ -17,7 +17,7 @@
 [package]
 name = "exochain-escalation"
 description = "EXOCHAIN constitutional trust fabric — operational nervous system: detection, triage, kanban, HITL, Sybil adjudication"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-escalation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

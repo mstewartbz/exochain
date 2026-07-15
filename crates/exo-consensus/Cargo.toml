@@ -17,6 +17,7 @@
 [package]
 name = "exochain-consensus"
 description = "EXOCHAIN constitutional trust fabric — consensus proofs and model quorum coordination"
+documentation = "https://docs.rs/exochain-consensus"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

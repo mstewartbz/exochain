@@ -649,3 +649,77 @@ assert_eq!(output.fields.get("processed").unwrap(), "true");
 - Do not grant permissions to the requesting actor (NoSelfGrant invariant).
 - Do not bypass consent checks (ConsentRequired invariant).
 - Do not remove human override capability (HumanOverride invariant).
+
+## Cursor Cloud specific instructions
+
+Durable, non-obvious notes for running this workspace in a Cursor Cloud VM. The
+startup update script already refreshes the toolchain (see below); standard
+build/test/lint/fmt commands live in `README.md` and `CONTRIBUTING.md` — use
+those, do not duplicate them here.
+
+### Toolchain
+
+- The workspace is Rust **edition 2024** and needs **rustc 1.85+**. The base VM
+  image may pin an older stable (e.g. 1.83) as the default toolchain, so the
+  update script runs `rustup default stable` after updating — without that,
+  `cargo build` fails with an edition2024 error. Nightly + `rustfmt` are
+  installed only for the `cargo +nightly fmt` gate.
+- The full `cargo test --workspace` gate is slow. Derive the current package
+  inventory with
+  `cargo metadata --no-deps --format-version 1 | jq '.packages | length'` and
+  the current test inventory with `cargo test --workspace -- --list`; do not
+  copy either count into durable instructions.
+  During iteration, scope with `-p <crate>` (crate package names are
+  `exochain-*`, e.g. `-p exochain-core`, `-p exochain-economy`).
+- `livesafe/` is intentionally excluded from the Cargo workspace (proprietary
+  subtree); workspace cargo gates never reach into it.
+
+### PostgreSQL is a required system dependency for the runtime
+
+The runnable binaries persist through Postgres via `sqlx`. Postgres is a
+**system dependency** (installed with `apt-get install postgresql`, NOT part of
+the update script). Start it and create a DB before running the servers:
+
+```bash
+read -r cluster_version cluster_name _ < <(pg_lsclusters --no-header | awk 'NR == 1 { print $1, $2 }')
+test -n "$cluster_version" && test -n "$cluster_name"
+sudo pg_ctlcluster "$cluster_version" "$cluster_name" start
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+sudo -u postgres psql -c "CREATE DATABASE exochain;"
+export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/exochain"
+```
+
+The literal `postgres` password above is restricted to an isolated,
+disposable local VM. Never reuse it in a shared, staging, or production
+database; obtain those credentials from the environment's secret manager.
+
+Schema migrations run automatically on gateway/node startup (the DAG DB schema
+is embedded in the binary via `sqlx::migrate!` and provisioned into a dedicated
+`dagdb` Postgres schema) — no manual `psql` migration step is needed.
+
+### Running exo-gateway (HTTP gateway)
+
+- Binary: `target/debug/exo-gateway`. Serves **plain HTTP** on `BIND_ADDRESS`
+  (default `127.0.0.1:8443`); TLS is off unless a cert/key is configured.
+- Without `DATABASE_URL` it still starts, but fails closed: `/ready` returns
+  `503 no_db_configured` and DAG DB routes are unavailable. With `DATABASE_URL`
+  set, `/ready` returns `200 dagdb_active` and `/health/db` reports `connected`.
+- Always-on probes (no DB, no auth): `GET /health`,
+  `GET /.well-known/exochain.json`.
+
+### Running exo-node (P2P governance node + dashboard)
+
+- The node binary is named **`exochain`** (package `exochain-node`), not
+  `exo-node`. Start with `./target/debug/exochain start --api-port 8080
+  --data-dir <dir>`.
+- It **fails closed at startup** unless `DATABASE_URL`, `EXO_DAGDB_TENANT_ID`,
+  and `EXO_DAGDB_NAMESPACE` are all set (canonical local dev values:
+  `EXO_DAGDB_TENANT_ID=dag_db-local`, `EXO_DAGDB_NAMESPACE=dag_db`).
+- Serves a live governance dashboard at `GET /` on the api port (default 8080)
+  and a P2P swarm on `--p2p-port` (default 4001, QUIC on port+1). The consensus
+  round increments continuously even for a standalone observer node.
+- Write/POST endpoints (economy, AVC, passport, etc.) require
+  `Authorization: Bearer <token>`. The node generates an admin bearer token on
+  startup and writes it to `<data-dir>/admin_token` (mode 0600); read it from
+  there for authenticated requests. Even some GETs on the merged extra routers
+  require the bearer.
