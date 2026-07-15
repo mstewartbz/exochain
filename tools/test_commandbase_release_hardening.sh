@@ -15,6 +15,11 @@ lockfile="command-base/app/package-lock.json"
 [[ -f "$lockfile" ]] || fail "$lockfile is missing"
 [[ -f command-base/app/lib/upload-policy.js ]] || fail "upload allowlist policy is missing"
 [[ -f command-base/app/lib/webhook-auth.js ]] || fail "webhook authentication boundary is missing"
+[[ -f command-base/LICENSE ]] || fail "command-base/LICENSE is missing"
+grep -F 'Proprietary and Confidential' command-base/LICENSE >/dev/null \
+  || fail 'command-base/LICENSE must declare the proprietary boundary'
+grep -F 'No license, express or implied, is granted' command-base/LICENSE >/dev/null \
+  || fail 'command-base/LICENSE must deny implicit grants'
 
 node <<'NODE'
 const fs = require('node:fs');
@@ -25,9 +30,20 @@ const fail = (message) => {
 };
 
 const pkg = JSON.parse(fs.readFileSync('command-base/app/package.json', 'utf8'));
+const workerPkg = JSON.parse(fs.readFileSync('command-base/worker/package.json', 'utf8'));
 const lock = JSON.parse(fs.readFileSync('command-base/app/package-lock.json', 'utf8'));
 const scripts = pkg.scripts || {};
 const dependencies = pkg.dependencies || {};
+
+if (pkg.license !== 'UNLICENSED') {
+  fail('command-base/app/package.json must declare UNLICENSED');
+}
+if (workerPkg.license !== 'UNLICENSED') {
+  fail('command-base/worker/package.json must declare UNLICENSED');
+}
+if (!lock.packages || !lock.packages[''] || lock.packages[''].license !== 'UNLICENSED') {
+  fail('command-base/app/package-lock.json root package must declare UNLICENSED');
+}
 
 if (scripts.preinstall !== 'npm audit --audit-level=critical') {
   fail('preinstall must fail closed with npm audit --audit-level=critical');
@@ -48,6 +64,17 @@ if (!locked || locked.version !== '2.2.0') {
   fail(`package-lock must resolve multer 2.2.0; found ${locked ? locked.version : '<missing>'}`);
 }
 NODE
+
+apache_spdx='SPDX-License-Identifier: Apache-''2.0'
+apache_grant='Licensed under the Apache'' License'
+if git grep -n -e "$apache_spdx" -e "$apache_grant" -- command-base; then
+  fail 'CommandBase retains explicit Apache-2.0 file grants'
+fi
+
+grep -F '"command-base/",' tools/license_headers.py >/dev/null \
+  || fail 'Apache header utility must exclude command-base/'
+grep -F 'proprietary adjacent surface' command-base/EXOCHAIN_SURFACE_INTAKE.md >/dev/null \
+  || fail 'CommandBase intake must classify the subtree as proprietary adjacent code'
 
 auth_source="$(<command-base/app/lib/auth.js)"
 [[ "$auth_source" == *"EXOCHAIN_AUTH_SECRET"* ]] || fail "auth fallback must use EXOCHAIN_AUTH_SECRET"
