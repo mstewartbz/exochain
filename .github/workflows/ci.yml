@@ -269,6 +269,10 @@ jobs:
           echo "✓ EXOCHAIN workspace license consistent: Apache-2.0"
       - name: Proprietary subtree license boundaries
         run: bash tools/test_proprietary_license_boundaries.sh
+      - name: LiveSafe demo adjacent-surface boundary
+        run: bash tools/test_livesafe_demo_security.sh
+      - name: CommandBase adjacent release hardening
+        run: bash tools/test_commandbase_release_hardening.sh
       - name: No GAP stubs remaining in code (A-102)
         # Fails if any `STUB` marker referencing a GAP-NNN identifier
         # remains in a code file. Prevents a GAP from being marked closed

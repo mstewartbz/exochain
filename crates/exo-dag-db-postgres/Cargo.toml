@@ -1,6 +1,7 @@
 [package]
 name = "exochain-dag-db-postgres"
 description = "EXOCHAIN DAG DB PostgreSQL persistence adapters"
+documentation = "https://docs.rs/exochain-dag-db-postgres"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

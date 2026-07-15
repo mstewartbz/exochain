@@ -17,7 +17,7 @@
 [package]
 name = "exochain-governance"
 description = "EXOCHAIN constitutional trust fabric — legislative legitimacy: quorum, clearance, crosscheck, challenge, delegation, deliberation"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-governance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

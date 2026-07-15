@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 'use strict';
 module.exports = function(app, db, helpers) {
   const { broadcast, localNow, createNotification, authRateLimiter, apiRateLimiter, spawnMemberTerminal } = helpers;
@@ -146,7 +130,21 @@ app.post('/api/refinement/candidates/:id/refine', (req, res) => {
     let memberId = candidate.assigned_member_id;
 
     if (!memberId) {
-      const assignment = db.prepare(`SELECT tm.id FROM refinement_team_assignments rta JOIN team_members tm ON rta.member_id = tm.id WHERE rta.target_id = ? AND rta.enabled = 1 AND tm.status = 'active' ORDER BY RANDOM() LIMIT 1`).get(candidate.target_id);
+      const assignment = db.prepare(`
+        SELECT tm.id
+        FROM refinement_team_assignments rta
+        JOIN team_members tm ON rta.member_id = tm.id
+        LEFT JOIN refinement_candidates active
+          ON active.assigned_member_id = tm.id
+         AND active.target_id = rta.target_id
+         AND active.status = 'in_progress'
+        WHERE rta.target_id = ?
+          AND rta.enabled = 1
+          AND tm.status = 'active'
+        GROUP BY tm.id
+        ORDER BY COUNT(active.id) ASC, tm.id ASC
+        LIMIT 1
+      `).get(candidate.target_id);
       if (!assignment) return res.status(400).json({ error: 'No enabled team members for this target' });
       memberId = assignment.id;
     }

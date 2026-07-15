@@ -39,8 +39,15 @@ test('CyberMedica carries the LiveSafe proprietary subtree boundary', async () =
     `CyberMedica files still declare Apache-2.0:\n${apacheMarkers.stdout}${apacheMarkers.stderr}`,
   );
 
-  assert.match(repositoryReadme, /Apache-2\.0 for EXOCHAIN core/);
-  assert.match(repositoryReadme, /`livesafe\/` and `cybermedica\/`/);
-  assert.match(repositoryReadme, /`livesafe\/LICENSE`/);
-  assert.match(repositoryReadme, /`cybermedica\/LICENSE`/);
+  assert.match(repositoryReadme, /Apache-2\.0 applies to EXOCHAIN core primitives/);
+  assert.match(
+    repositoryReadme,
+    /\[`livesafe\/`\]\(livesafe\/\) and\s+\[`cybermedica\/`\]\(cybermedica\/\) subtrees require commercial licensing terms/,
+  );
+  assert.match(
+    repositoryReadme,
+    /EXOCHAIN `Licensure` bailments and\s+`exo-economy-use-event-v1` usage accounting/,
+  );
+  assert.match(repositoryReadme, /\[livesafe\/LICENSE\]\(livesafe\/LICENSE\)/);
+  assert.match(repositoryReadme, /\[cybermedica\/LICENSE\]\(cybermedica\/LICENSE\)/);
 });

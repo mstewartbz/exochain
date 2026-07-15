@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 'use strict';
 
 function normalizeSshHost(value) {
@@ -65,6 +49,36 @@ module.exports = function(app, db, helpers) {
     notFound,
   } = helpers;
   const stmt = helpers.stmt || ((sql) => db.prepare(sql));
+
+function isSensitiveSettingKey(key) {
+  const lower = String(key || '').toLowerCase();
+  return lower === 'webhook_secret'
+    || lower === 'anthropic_api_key'
+    || lower === 'oauth_token'
+    || lower.endsWith('_token')
+    || lower.endsWith('_key')
+    || lower.endsWith('_secret')
+    || lower.endsWith('_password')
+    || lower.endsWith('_passwd')
+    || lower.endsWith('_auth')
+    || lower.endsWith('_sid')
+    || lower.endsWith('_apikey')
+    || lower.startsWith('auth_')
+    || lower.startsWith('secret_')
+    || lower.startsWith('token_')
+    || lower.startsWith('api_key_')
+    || lower.includes('api_key')
+    || lower.includes('apikey')
+    || lower.includes('access_key')
+    || lower.includes('client_secret');
+}
+
+function looksMaskedSecretValue(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return /[•*]{2,}/.test(trimmed);
+}
 
 // GET /api/model-sources — list all configured model sources with live status
 app.get('/api/model-sources', async (req, res) => {
@@ -635,6 +649,9 @@ app.post('/api/llm/providers', (req, res) => {
     if (!type || !['claude', 'openai', 'ollama', 'perplexity', 'custom'].includes(type)) {
       return res.status(400).json({ error: 'type must be one of: claude, openai, ollama, perplexity, custom' });
     }
+    if (looksMaskedSecretValue(api_key)) {
+      return res.status(400).json({ error: 'api_key must be an unmasked secret value' });
+    }
     const now = localNow();
     const configStr = JSON.stringify(config || {});
     const result = db.prepare(`
@@ -675,7 +692,15 @@ app.put('/api/llm/providers/:id', (req, res) => {
         if (f === 'type' && !['claude', 'openai', 'ollama', 'perplexity', 'custom'].includes(req.body[f])) {
           return res.status(400).json({ error: 'type must be one of: claude, openai, ollama, perplexity, custom' });
         }
-        if (f === 'config') {
+        if (f === 'api_key') {
+          if (looksMaskedSecretValue(req.body[f])) {
+            return res.status(400).json({
+              error: 'api_key must be omitted to keep the existing key or supplied as a new unmasked secret'
+            });
+          }
+          updates.push('api_key = ?');
+          values.push(req.body[f]);
+        } else if (f === 'config') {
           updates.push('config = ?');
           values.push(JSON.stringify(req.body[f]));
         } else if (f === 'enabled') {
@@ -919,21 +944,6 @@ app.get('/api/vault/:id', (req, res, next) => {
     row.encrypted_value = maskCredential(row.encrypted_value);
     row.metadata = JSON.parse(row.metadata || '{}');
     res.json(row);
-  } catch (err) { next(err); }
-});
-
-// GET /api/vault/:id/value — returns the FULL unmasked value (for agents to use internally)
-// SECURITY: Restricted to localhost only — this endpoint must never be reachable from the network.
-app.get('/api/vault/:id/value', authRateLimiter, (req, res, next) => {
-  try {
-    const ip = req.ip || req.socket.remoteAddress || '';
-    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-    if (!isLocal) {
-      return res.status(403).json({ error: 'This endpoint is only accessible from localhost' });
-    }
-    const row = db.prepare('SELECT id, name, provider, credential_type, encrypted_value FROM credential_vault WHERE id = ?').get(req.params.id);
-    if (!row) throw notFound('Credential not found');
-    res.json({ id: row.id, name: row.name, provider: row.provider, credential_type: row.credential_type, value: row.encrypted_value });
   } catch (err) { next(err); }
 });
 

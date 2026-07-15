@@ -1,19 +1,3 @@
-// Copyright 2026 Exochain Foundation
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at:
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth, type AuthState } from '@/hooks/useAuth';
@@ -37,10 +21,10 @@ export default function Login({ mode: initialMode = 'login' }: Props) {
   const handleSubmit = async () => {
     if (!passphrase || !apiToken.trim()) return;
     setIsLoading(true);
-    setStatus('Deriving secure identity...');
+    setStatus('Hashing passphrase locally and requesting LiveSafe keys...');
 
     try {
-      // Derive identity from passphrase (zero-knowledge)
+      // Hash the passphrase locally; the passphrase itself never leaves this browser.
       const encoder = new TextEncoder();
       const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(passphrase));
       const hashArray = new Uint8Array(hashBuffer);
@@ -173,7 +157,7 @@ export default function Login({ mode: initialMode = 'login' }: Props) {
         )}
 
         <p className="text-[10px] text-white/20 text-center mt-10">
-          Your passphrase never leaves this device. Keys are derived locally.
+          Your passphrase never leaves this device. LiveSafe encryption keys are returned by the adjacent API and stored for this browser session.
         </p>
       </div>
     </div>

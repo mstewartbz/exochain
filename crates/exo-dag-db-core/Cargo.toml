@@ -1,6 +1,7 @@
 [package]
 name = "exochain-dag-db-core"
 description = "EXOCHAIN DAG DB deterministic primitives and shared validation"
+documentation = "https://docs.rs/exochain-dag-db-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
