@@ -25,6 +25,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-14
+
+### Security / Correctness
+
+- Standardized private 0dentity reads on owner-session verification while
+  preserving signed writes, cryptographic attestations, and documented DID
+  binding across the node, SDK, and fabric boundary.
+- Bound SDK, Holon, and MCP action provenance to the submitting actor signer,
+  failing closed when an independent actor key cannot be resolved safely.
+- Enforced the canonical five-link authority-chain depth in gatekeeper core and
+  reused that core limit at the MCP adapter boundary.
+- Replaced the GraphQL runtime's single state mutex with deterministic indexed
+  reader/writer state while preserving authenticated adjudication and
+  fail-closed mutations.
+- Denied unknown CyberMedica governed actions and rejected caller-forged
+  LiveSafe public-output permits that lack runtime-adapter transport provenance.
+- Hardened CommandBase determinism, secrets, uploads, webhooks, and receipt
+  boundaries without promoting its adjacent heuristic records into EXOCHAIN
+  constitutional authority.
+- Constrained LiveSafe demo preview hosts and API-key provenance, verified the
+  demo WASM adapter, and removed unsupported EXOCHAIN trust language from
+  proprietary demo surfaces.
+
+### Commercial Licensing
+
+- Restricted Apache-2.0 licensing to EXOCHAIN core primitives. Decision Forum
+  product, LegalDyne, CyberMedica, LiveSafe, and CrossChecked require commercial
+  terms tracked through EXOCHAIN `Licensure` bailments,
+  `exo-economy-use-event-v1` usage accounting, and settlement. The
+  Apache-licensed `crates/decision-forum` primitive remains distinct from the
+  proprietary Decision Forum product.
+
+### Release / CI / Documentation
+
+- Removed the README Rust LOC metric and its constitutional assertions while
+  retaining the backward-compatible `repo_truth.sh --json` `rust_loc`
+  diagnostic.
+- Replaced drifting Cursor Cloud crate/test counts with manifest-derived
+  commands and validated the documented PostgreSQL cluster commands.
+- Aligned publishable crate documentation metadata with crate-specific docs.rs
+  URLs and strengthened packaging verification.
+- Reconciled every frozen local and remote branch ref through the dated 0.2.3
+  execution ledger without deleting branches or the explicit
+  `refuted-do-not-merge/*` tags.
+
 ## [0.2.2] - 2026-07-10
 
 ### Security / Correctness
