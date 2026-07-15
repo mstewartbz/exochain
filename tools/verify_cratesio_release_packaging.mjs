@@ -120,6 +120,12 @@ for (const pkg of packages) {
   if (!pkg.description || !pkg.description.trim()) {
     failures.push(`${relativeManifest} must include a crates.io package description`);
   }
+  const expectedDocumentation = `https://docs.rs/${pkg.name}`;
+  if (pkg.documentation !== expectedDocumentation) {
+    failures.push(
+      `${relativeManifest} documentation must be ${expectedDocumentation}, got ${pkg.documentation ?? "missing"}`,
+    );
+  }
   if (Array.isArray(pkg.publish) && pkg.publish.length === 0) {
     failures.push(`${relativeManifest} is still publish=false through workspace inheritance`);
   }

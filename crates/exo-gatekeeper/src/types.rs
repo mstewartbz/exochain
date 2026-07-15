@@ -313,6 +313,12 @@ pub struct AuthorityLink {
 /// resolved key material for the claimed grantor DID.
 pub type TrustedAuthorityKeys = BTreeMap<Did, Vec<Vec<u8>>>;
 
+/// Maximum number of signed delegation links accepted by gatekeeper core.
+///
+/// Adapters may reject an over-depth chain earlier, but direct kernel callers
+/// must receive the same fail-closed bound.
+pub const MAX_AUTHORITY_CHAIN_LINKS: usize = 5;
+
 /// DID-resolved Ed25519 public keys trusted for actor provenance.
 ///
 /// Provenance objects still carry the key used for signature verification, but

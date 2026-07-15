@@ -17,7 +17,7 @@
 [package]
 name = "exochain-sdk"
 description = "EXOCHAIN SDK — ergonomic Rust API for the constitutional governance fabric"
-documentation = "https://docs.exochain.io/sdk"
+documentation = "https://docs.rs/exochain-sdk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

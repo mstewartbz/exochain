@@ -1,6 +1,7 @@
 [package]
 name = "exochain-dag-db-exchange"
 description = "EXOCHAIN DAG DB import, export, and writeback contracts"
+documentation = "https://docs.rs/exochain-dag-db-exchange"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

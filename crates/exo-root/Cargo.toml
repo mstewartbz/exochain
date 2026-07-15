@@ -17,7 +17,7 @@
 [package]
 name = "exochain-root"
 description = "EXOCHAIN root genesis authority ceremony, FROST DKG, threshold signatures, and trust bundle verification"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-root"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -17,7 +17,7 @@
 [package]
 name = "exochain-messaging"
 description = "EXOCHAIN constitutional trust fabric — end-to-end encrypted messaging with X25519 key exchange"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-messaging"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

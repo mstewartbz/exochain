@@ -17,7 +17,7 @@
 [package]
 name = "exochain-proofs"
 description = "EXOCHAIN zero-knowledge proof skeleton -- UNAUDITED, pedagogical only. See crate README."
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-proofs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -17,7 +17,7 @@
 [package]
 name = "exochain-authority"
 description = "EXOCHAIN authority chain verification and delegation management"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-authority"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
