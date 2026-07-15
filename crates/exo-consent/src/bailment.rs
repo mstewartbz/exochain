@@ -36,6 +36,8 @@ pub enum BailmentType {
     Processing,
     /// Bailee may delegate authority to sub-bailees.
     Delegation,
+    /// Bailee receives a commercially bounded right to use a licensed product.
+    Licensure,
     /// Emergency access — time-limited, requires justification.
     Emergency,
 }
