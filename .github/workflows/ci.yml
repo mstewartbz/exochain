@@ -757,6 +757,13 @@ jobs:
           path: packages/exochain-wasm/wasm/
       - name: Run bridge verification
         run: node packages/exochain-wasm/test/bridge_verification.mjs
+      - name: Verify demo WASM adapter source boundary
+        run: bash tools/test_demo_wasm_adapter_boundary.sh
+      - name: Verify demo WASM adapter runtime
+        run: |
+          mkdir -p demo/packages/exochain-wasm/wasm
+          cp -R packages/exochain-wasm/wasm/. demo/packages/exochain-wasm/wasm/
+          node demo/packages/exochain-wasm/test.mjs
 
   # -----------------------------------------------------------------------
   # Gate 22: WASM export count sync
