@@ -17,7 +17,7 @@
 [package]
 name = "exochain-catapult"
 description = "EXOCHAIN Catapult — franchise business incubator with FM 3-05 operational doctrine"
-documentation = "https://docs.exochain.io"
+documentation = "https://docs.rs/exochain-catapult"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
